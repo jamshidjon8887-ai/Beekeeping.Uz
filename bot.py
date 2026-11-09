@@ -31,9 +31,9 @@ from telegram.ext import (
 # ==========================================
 # SOZLAMALAR (CONFIGURATION)
 # ==========================================
-BOT_TOKEN = "9209261766:AAEwCxvnB0FFfd8Km0inaEhdDNWiEI1Ycv0"
-GEMINI_API_KEY = "AQ.Ab8RN6Lu3jGSvxVGoVR6ua9zV-BwFSeWNGnnqcP12NUf2Cl0mw"
-ADMIN_TELEGRAM_ID = 2047501151  # Jamshid Davronov
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9209261766:AAEwCxvnB0FFfd8Km0inaEhdDNWiEI1Ycv0")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6Lu3jGSvxVGoVR6ua9zV-BwFSeWNGnnqcP12NUf2Cl0mw")
+ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_ID", "2047501151"))  # Jamshid Davronov
 
 # Tavsiya etilgan modellar ketma-ketligi (birinchisi ishlamasa, keyingisiga o'tadi)
 MODELS_TO_TRY = [
@@ -269,12 +269,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Xatolik: {e}")
-        await message.reply_text(
-            QUOTA_ERROR_MESSAGE,
-            reply_to_message_id=message.message_id if is_group else None,
-            message_thread_id=thread_id if is_group else None,
-            allow_sending_without_reply=True
-        )
+        err_str = str(e)
+        if is_owner and ("401" in err_str or "API_KEY" in err_str or "BLOCKED" in err_str or "UNAUTHENTICATED" in err_str or "not valid" in err_str):
+            admin_notice = (
+                "⚠️ Ҳурматли Админ!\n\n"
+                "Google Gemini API калити блокланган (API_KEY_SERVICE_BLOCKED).\n"
+                "GitHub'га очиқ юклангани сабабли Google хавфсизлик юзасидан ушбу калитни ўчирган.\n\n"
+                "👉 Янги текин калит олиш: https://aistudio.google.com/app/apikey\n"
+                "Янги калитни олиб, Render'да Environment бўлимига (GEMINI_API_KEY) киритишингиз керак."
+            )
+            await message.reply_text(
+                admin_notice,
+                reply_to_message_id=message.message_id if is_group else None,
+                message_thread_id=thread_id if is_group else None,
+                allow_sending_without_reply=True
+            )
+        else:
+            await message.reply_text(
+                QUOTA_ERROR_MESSAGE,
+                reply_to_message_id=message.message_id if is_group else None,
+                message_thread_id=thread_id if is_group else None,
+                allow_sending_without_reply=True
+            )
 
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
