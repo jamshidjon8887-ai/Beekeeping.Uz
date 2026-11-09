@@ -16,14 +16,21 @@ import os
 import re
 import logging
 import asyncio
+import urllib.parse
 from typing import List, Dict
 
 import google.generativeai as genai
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -103,6 +110,109 @@ def call_gemini_with_fallback(prompt: str, history: List[Dict[str, str]]) -> str
 
 
 # ==========================================
+# MA'LUMOTLAR OSTIDAGI TUGMALAR VA REAKSIYALAR
+# ==========================================
+def get_info_inline_keyboard(text_to_share: str = "") -> InlineKeyboardMarkup:
+    """
+    Бот юборган ҳар қандай маълумот остида:
+    1-қатор: 👍 | 👎 | ❤️ | 👏 (босилганда сони ошади)
+    2-қатор: 📢 Asalarichilik.Uz 🇺🇿 (@Uz_Asalarichilik) | 👥 Расмий Гуруҳ (@Asalarichilik_Uzbekistan)
+    3-қатор: 📺 YouTube Каналимиз (https://youtube.com/@asalarichilikuztv?feature=shared)
+    4-қатор: ↗️ Улашиш (тўлиқ кўчириб улашиш) | 💬 Мутахассис (@Asalarichilikuztv_bot)
+    """
+    clean_text = text_to_share.strip()
+    if len(clean_text) > 1200:
+        clean_text = clean_text[:1200] + "..."
+
+    share_caption = (
+        f"{clean_text}\n\n"
+        "🐝 Канал: @Uz_Asalarichilik\n"
+        "👥 Расмий Гуруҳ: @Asalarichilik_Uzbekistan\n"
+        "📺 YouTube: https://youtube.com/@asalarichilikuztv?feature=shared\n"
+        "💬 Мутахассис: @Asalarichilikuztv_bot"
+    )
+    share_link = f"https://t.me/share/url?url=https://t.me/Uz_Asalarichilik&text={urllib.parse.quote(share_caption)}"
+
+    keyboard = [
+        # 1-қатор: Смайликлар (реакциялар)
+        [
+            InlineKeyboardButton("👍", callback_data="react:like"),
+            InlineKeyboardButton("👎", callback_data="react:dislike"),
+            InlineKeyboardButton("❤️", callback_data="react:heart"),
+            InlineKeyboardButton("👏", callback_data="react:clap"),
+        ],
+        # 2-қатор: Канал ва Расмий Гуруҳ
+        [
+            InlineKeyboardButton("📢 Asalarichilik.Uz 🇺🇿", url="https://t.me/Uz_Asalarichilik"),
+            InlineKeyboardButton("👥 Расмий Гуруҳ", url="https://t.me/Asalarichilik_Uzbekistan"),
+        ],
+        # 3-қатор: YouTube каналимиз
+        [
+            InlineKeyboardButton("📺 YouTube Каналимиз", url="https://youtube.com/@asalarichilikuztv?feature=shared"),
+        ],
+        # 4-қатор: Улашиш ва Мутахассис
+        [
+            InlineKeyboardButton("↗️ Улашиш", url=share_link),
+            InlineKeyboardButton("💬 Мутахассис", url="https://t.me/Asalarichilikuztv_bot"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def handle_reaction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Фойдаланувчи смайликларни босганда сонини ошириш ва ташаккур билдириш"""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    data = query.data
+    if not data.startswith("react:"):
+        return
+
+    emoji_map = {
+        "react:like": "👍",
+        "react:dislike": "👎",
+        "react:heart": "❤️",
+        "react:clap": "👏",
+    }
+
+    target_emoji = emoji_map.get(data)
+    if not target_emoji:
+        await query.answer()
+        return
+
+    try:
+        msg = query.message
+        if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
+            current_rows = [list(row) for row in msg.reply_markup.inline_keyboard]
+            row0 = current_rows[0]
+            new_row0 = []
+            for btn in row0:
+                if btn.callback_data == data:
+                    current_text = btn.text
+                    parts = current_text.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        new_count = int(parts[1]) + 1
+                        new_text = f"{parts[0]} {new_count}"
+                    else:
+                        new_text = f"{target_emoji} 1"
+                    new_row0.append(InlineKeyboardButton(new_text, callback_data=btn.callback_data))
+                else:
+                    new_row0.append(btn)
+
+            current_rows[0] = new_row0
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(current_rows))
+
+        await query.answer(text=f"Ташаккур! Фикрингиз қабул қилинди {target_emoji}", show_alert=False)
+    except Exception as e:
+        logger.debug(f"Reaction error: {e}")
+        try:
+            await query.answer(text=f"Фикрингиз қабул қилинди {target_emoji}")
+        except Exception:
+            pass
+
+
+# ==========================================
 # /start BUYRUG'I
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,21 +220,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat = update.effective_chat
-    user = update.effective_user
+    keyboard = get_info_inline_keyboard(WELCOME_MESSAGE)
 
-    # Shaxsiy chatda /start menyu tugmasini chiqarish
-    if chat.type == "private":
-        keyboard = ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
-        await update.message.reply_text(
-            WELCOME_MESSAGE,
-            reply_markup=keyboard
-        )
-    else:
-        # Guruhda bo'lsa reply qilib yuboradi
-        await update.message.reply_text(
-            WELCOME_MESSAGE,
-            reply_to_message_id=update.message.message_id
-        )
+    await update.message.reply_text(
+        WELCOME_MESSAGE,
+        reply_to_message_id=update.message.message_id if chat.type != "private" else None,
+        reply_markup=keyboard
+    )
 
 
 # ==========================================
@@ -223,7 +325,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await message.reply_text(
             greeting_text,
-            reply_to_message_id=message.message_id if is_group else None
+            reply_to_message_id=message.message_id if is_group else None,
+            reply_markup=get_info_inline_keyboard(greeting_text)
         )
         return
 
@@ -261,11 +364,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_memory[chat_id] = chat_memory[chat_id][-MEMORY_LIMIT * 2:]
 
         # Guruhda bo'lsa aynan foydalanuvchi xabariga reply qilib jo'natish (Forum / Topics qo'llab-quvvatlanadi!)
+        # Ҳар бир маълумот остида смайликлар ва ҳаволалар тўплами қўшилади
+        info_keyboard = get_info_inline_keyboard(answer)
         await message.reply_text(
             answer[:4096],
             reply_to_message_id=message.message_id if is_group else None,
             message_thread_id=thread_id if is_group else None,
-            allow_sending_without_reply=True
+            allow_sending_without_reply=True,
+            reply_markup=info_keyboard
         )
     except Exception as e:
         logger.error(f"Xatolik: {e}")
@@ -289,7 +395,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 QUOTA_ERROR_MESSAGE,
                 reply_to_message_id=message.message_id if is_group else None,
                 message_thread_id=thread_id if is_group else None,
-                allow_sending_without_reply=True
+                allow_sending_without_reply=True,
+                reply_markup=get_info_inline_keyboard(QUOTA_ERROR_MESSAGE)
             )
 
 
@@ -350,7 +457,7 @@ def run_render_web_server():
     port = int(os.getenv("PORT", "10000"))
     try:
         server = HTTPServer(("0.0.0.0", port), RenderHealthHandler)
-        print(f"Render.com uchun {port}-port muvaffaqiyatli ochildi va tinglanmoqda...")
+        print(f"Render.com учун {port}-port муваффақиятли очилди ва тингланмоқда...")
         server.serve_forever()
     except Exception as e:
         print(f"Port binding xabari: {e}")
@@ -370,6 +477,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CallbackQueryHandler(handle_reaction_callback, pattern=r"^react:"))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
