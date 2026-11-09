@@ -51,19 +51,23 @@ MODELS_TO_TRY = [
 ]
 
 SYSTEM_INSTRUCTION = (
-    "Сиз Beekeeping.Uz 🇺🇿 loyihasining professional va xushmuomala sun'iy intellekt yordamchisisiz. "
-    "Asalarichilik, ona ari yetishtirish, asal turlari, asalari kasalliklari (varroa, nozomatoz va boshqalar) "
-    "hamda umumiy savollarga o'zbek tilida (kirill va lotin alifbolarida, foydalanuvchi qaysi tilda yozsa shu tilda) "
-    "aniq, tushunarli va amaliy maslahatlar bering."
+    "Сиз Beekeeping.Uz 🇺🇿 асаларичилик канали ва гуруҳининг мутахассис ёрдамчисисиз.\n\n"
+    "ҚАТЪИЙ ҚОИДАЛАР:\n"
+    "1. Ҳар доим сўзингизни «Ассалому алайкум вароҳматуллоҳ!» дея бошланг.\n"
+    "2. «Beekeeping.Uz лойиҳасига хуш келибсиз» ёки шунга ўхшаш таништирув жумлаларини МУТЛАҚО ёзманг! Дарҳол саволнинг аниқ ва амалий жавобига ўтинг.\n"
+    "3. 2-расмдагидек маълумот чиройли ва кўркам бўлиши учун асосий сарлавҳаларни ва муҳим сўзларни қалин (**bold**) қилиб кўрсатинг.\n"
+    "4. Бандларни 1., 2., 3. қилиб рақамланг ва ҳар бир банд номини қалин қилиб ажратинг (масалан: 1. **Генетик сифатни назорат қилиш (Селекция):** Табиий рой...).\n"
+    "5. Асаларичилик, она ари парвариши, она арини сунъий урчитиш, касалликлар ва соҳага оид барча саволларга ўзбек тилида тушунарли, аниқ ва батафсил жавоб беринг."
 )
 
 WELCOME_MESSAGE = (
-    "🐝 Ассалому алайкум! Beekeeping.Uz 🇺🇿 асаларичилик ботига хуш келибсиз!\n\n"
+    "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
     "Сизга асаларичилик, она ари парвариши, касалликларга қарши кураш ва соҳага оид барча саволлар бўйича ёрдам бера оламан.\n\n"
     "Саволингизни бемалол ёзишингиз мумкин."
 )
 
 QUOTA_ERROR_MESSAGE = (
+    "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
     "🤖 Кечирасиз, ҳозирда Beekeeping.Uz🇺🇿 сўровлар чеклови (quota) вақтинча тўлди. "
     "Илтимос, бир оздан сўнг қайта ёзиб кўринг."
 )
@@ -212,6 +216,70 @@ async def handle_reaction_callback(update: Update, context: ContextTypes.DEFAULT
             pass
 
 
+def format_to_telegram_html(text: str) -> str:
+    """
+    Gemini матнини Telegram HTML га айлантириб, 2-расмдагидек асосий матнлар,
+    сарлавҳалар ва рақамланган бандларни (1., 2., 3.) қалин (<b>bold</b>) кўрсатиш.
+    Ҳар доим 'Ассалому алайкум вароҳматуллоҳ!' билан бошлашни таъминлайди.
+    'Beekeeping.Uz лойиҳасига хуш келибсиз' сўзини бутунлай олиб ташлайди.
+    """
+    if not text:
+        return ""
+
+    # 1. HTML махсус белгиларини ҳимоялаш
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # 2. Код блоклари
+    text = re.sub(r"```(?:\w+)?\n?(.*?)```", r"<pre><code>\1</code></pre>", text, flags=re.S)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+
+    # 3. Сарлавҳалар: ### Сарлавҳа ёки ## Сарлавҳа -> <b>Сарлавҳа</b>
+    text = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", text)
+
+    # 4. Қалин матнлар: **матн** ёки __матн__ -> <b>матн</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+
+    # 5. Ортиқча "Beekeeping.Uz лойиҳасига хуш келибсиз" сўзларини олиб ташлаш
+    text = re.sub(r"(?i)beekeeping\.uz\s*(?:лойиҳасига|loyihasiga)\s*(?:хуш\s*келибсиз|xush\s*kelibsiz)[.!?,]*\s*", "", text)
+    text = re.sub(r"(?i)лойиҳасига\s*хуш\s*келибсиз[.!?,]*\s*", "", text)
+
+    # 6. Сўз бошланиши: «Ассалому алайкум вароҳматуллоҳ!» билан бошланишини таъминлаш
+    first_line_clean = text.strip()
+    if not re.match(r"^(?:<b>)?\s*ассалому\s*алайкум\s*вароҳматуллоҳ", first_line_clean, flags=re.I):
+        # Агар олдида оддий "Ассалому алайкум!" бўлса, уни олиб ташлаб тўлиқ саломга алмаштирамиз
+        text = re.sub(r"^(?:<b>)?\s*(?:ассалому\s*алайкум[!.]*|assalomu\s*alaykum[!.]*)\s*(?:</b>)?\s*", "", text, flags=re.I).strip()
+        text = "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n" + text
+
+    return text
+
+
+async def send_formatted_reply(message, raw_text: str, is_group: bool, thread_id: int = None):
+    """Матнни кўркам HTML шаклида, смайликлар ва ҳаволалар тугмаси билан юбориш"""
+    formatted_html = format_to_telegram_html(raw_text)
+    plain_text = re.sub(r"<[^>]+>", "", formatted_html)
+    info_keyboard = get_info_inline_keyboard(plain_text)
+
+    try:
+        await message.reply_text(
+            formatted_html[:4096],
+            reply_to_message_id=message.message_id if is_group else None,
+            message_thread_id=thread_id if is_group else None,
+            allow_sending_without_reply=True,
+            parse_mode="HTML",
+            reply_markup=info_keyboard
+        )
+    except Exception as e:
+        logger.warning(f"HTML parse_mode xatosi ({e}), oddiy matn bilan yuborilmoqda...")
+        await message.reply_text(
+            plain_text[:4096],
+            reply_to_message_id=message.message_id if is_group else None,
+            message_thread_id=thread_id if is_group else None,
+            allow_sending_without_reply=True,
+            reply_markup=info_keyboard
+        )
+
+
 # ==========================================
 # /start BUYRUG'I
 # ==========================================
@@ -220,11 +288,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat = update.effective_chat
-    keyboard = get_info_inline_keyboard(WELCOME_MESSAGE)
+    keyboard = get_info_inline_keyboard(re.sub(r"<[^>]+>", "", WELCOME_MESSAGE))
 
     await update.message.reply_text(
         WELCOME_MESSAGE,
         reply_to_message_id=update.message.message_id if chat.type != "private" else None,
+        parse_mode="HTML",
         reply_markup=keyboard
     )
 
@@ -318,16 +387,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ).strip()
 
     # Agar foydalanuvchi shunchaki "salom bot" deb yozgan bo'lsa:
+    # "Агар бирор киши ботга қарата салом бот деса Ваалайкум ассалом вараҳматуллоҳ дея жавоб қайтарсин"
     if not clean_text and has_trigger:
         greeting_text = (
-            "Ассалому алайкум! Beekeeping.Uz 🇺🇿 асаларичилик боти хизматингизда. "
-            "Сизга қандай ёрдам беришим мумкин? Саволингизни бемалол ёзишингиз мумкин."
+            "<b>Ваалайкум ассалом вараҳматуллоҳ!</b>\n\n"
+            "Сизга қандай ёрдам беришим мумкин? Асаларичилик бўйича саволингизни бемалол ёзишингиз мумкин."
         )
-        await message.reply_text(
-            greeting_text,
-            reply_to_message_id=message.message_id if is_group else None,
-            reply_markup=get_info_inline_keyboard(greeting_text)
-        )
+        await send_formatted_reply(message, greeting_text, is_group=is_group, thread_id=thread_id)
         return
 
     # Context (agar botning avvalgi javobiga reply qilingan bo'lsa)
@@ -364,40 +430,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_memory[chat_id] = chat_memory[chat_id][-MEMORY_LIMIT * 2:]
 
         # Guruhda bo'lsa aynan foydalanuvchi xabariga reply qilib jo'natish (Forum / Topics qo'llab-quvvatlanadi!)
-        # Ҳар бир маълумот остида смайликлар ва ҳаволалар тўплами қўшилади
-        info_keyboard = get_info_inline_keyboard(answer)
-        await message.reply_text(
-            answer[:4096],
-            reply_to_message_id=message.message_id if is_group else None,
-            message_thread_id=thread_id if is_group else None,
-            allow_sending_without_reply=True,
-            reply_markup=info_keyboard
-        )
+        # 2-расмдагидек маълумот чиройли ва кўркам, асосий матнлар қалин (bold), бошланиши 'Ассалому алайкум вароҳматуллоҳ!' бўлади
+        await send_formatted_reply(message, answer, is_group=is_group, thread_id=thread_id)
     except Exception as e:
         logger.error(f"Xatolik: {e}")
         err_str = str(e)
         if is_owner and ("401" in err_str or "API_KEY" in err_str or "BLOCKED" in err_str or "UNAUTHENTICATED" in err_str or "not valid" in err_str):
             admin_notice = (
-                "⚠️ Ҳурматли Админ!\n\n"
+                "⚠️ <b>Ҳурматли Админ!</b>\n\n"
                 "Google Gemini API калити блокланган (API_KEY_SERVICE_BLOCKED).\n"
                 "GitHub'га очиқ юклангани сабабли Google хавфсизлик юзасидан ушбу калитни ўчирган.\n\n"
                 "👉 Янги текин калит олиш: https://aistudio.google.com/app/apikey\n"
                 "Янги калитни олиб, Render'да Environment бўлимига (GEMINI_API_KEY) киритишингиз керак."
             )
-            await message.reply_text(
-                admin_notice,
-                reply_to_message_id=message.message_id if is_group else None,
-                message_thread_id=thread_id if is_group else None,
-                allow_sending_without_reply=True
-            )
+            await send_formatted_reply(message, admin_notice, is_group=is_group, thread_id=thread_id)
         else:
-            await message.reply_text(
-                QUOTA_ERROR_MESSAGE,
-                reply_to_message_id=message.message_id if is_group else None,
-                message_thread_id=thread_id if is_group else None,
-                allow_sending_without_reply=True,
-                reply_markup=get_info_inline_keyboard(QUOTA_ERROR_MESSAGE)
-            )
+            await send_formatted_reply(message, QUOTA_ERROR_MESSAGE, is_group=is_group, thread_id=thread_id)
 
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
