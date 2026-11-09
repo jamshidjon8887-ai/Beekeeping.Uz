@@ -328,11 +328,42 @@ async def post_init(application: Application):
         print(f"delete_my_commands xatosi: {e}")
 
 
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class RenderHealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Beekeeping.Uz Telegram Bot is running 24/7 on Render!".encode("utf-8"))
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+def run_render_web_server():
+    """Render.com Web Service port scan xatosini to'liq yechuvchi server"""
+    port = int(os.getenv("PORT", "10000"))
+    try:
+        server = HTTPServer(("0.0.0.0", port), RenderHealthHandler)
+        print(f"Render.com uchun {port}-port muvaffaqiyatli ochildi va tinglanmoqda...")
+        server.serve_forever()
+    except Exception as e:
+        print(f"Port binding xabari: {e}")
+
+
 def main():
     print("=" * 50)
     print("Beekeeping.Uz 🇺🇿 Telegram Bot ishga tushirilmoqda...")
     print(f"Admin ID: {ADMIN_TELEGRAM_ID}")
     print("=" * 50)
+
+    # 1. Render.com Web Service port scan xatosini oldini olish uchun port ochish
+    threading.Thread(target=run_render_web_server, daemon=True).start()
 
     from telegram.ext import ChatMemberHandler
 
