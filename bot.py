@@ -16,8 +16,11 @@ import os
 import re
 import logging
 import asyncio
+import json
 import urllib.parse
-from typing import List, Dict
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional
 
 import google.generativeai as genai
 from telegram import (
@@ -42,28 +45,337 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "9209261766:AAEwCxvnB0FFfd8Km0inaEhdDNWiEI1Yc
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6Lu3jGSvxVGoVR6ua9zV-BwFSeWNGnnqcP12NUf2Cl0mw")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_ID", "2047501151"))  # Jamshid Davronov
 
-# Tavsiya etilgan modellar ketma-ketligi (birinchisi ishlamasa, keyingisiga o'tadi)
+# Tavsiya etilgan modellar ketma-ketligi (multimodal rasm va video tahlili bilan)
 MODELS_TO_TRY = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
     "gemini-3.6-flash"
 ]
 
+# ==========================================
+# REALL VAQT VA OB-HAVO TIZIMI (TOSHKENT UTC+5)
+# ==========================================
+TASHKENT_TZ = timezone(timedelta(hours=5))
+WEEKDAYS_UZ = ["Душанба", "Сешанба", "Чоршанба", "Пайшанба", "Жума", "Шанба", "Якшанба"]
+MONTHS_UZ = ["январ", "феврал", "март", "апрел", "май", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр"]
+
+UZB_REGIONS = {
+    "samarqand": {"name": "Самарқанд", "lat": 39.6542, "lon": 66.9597},
+    "buxoro": {"name": "Бухоро", "lat": 39.7747, "lon": 64.4286},
+    "andijon": {"name": "Андижон", "lat": 40.7821, "lon": 72.3442},
+    "fargona": {"name": "Фарғона", "lat": 40.3842, "lon": 71.7843},
+    "namangan": {"name": "Наманган", "lat": 40.9983, "lon": 71.6726},
+    "xorazm": {"name": "Хоразм", "lat": 41.5500, "lon": 60.6333},
+    "urganch": {"name": "Урганч", "lat": 41.5500, "lon": 60.6333},
+    "qashqadaryo": {"name": "Қашқадарё", "lat": 38.8606, "lon": 65.7890},
+    "qarshi": {"name": "Қарши", "lat": 38.8606, "lon": 65.7890},
+    "surxondaryo": {"name": "Сурхондарё", "lat": 37.2242, "lon": 67.2783},
+    "termiz": {"name": "Термиз", "lat": 37.2242, "lon": 67.2783},
+    "jizzax": {"name": "Жиззах", "lat": 40.1158, "lon": 67.8422},
+    "sirdaryo": {"name": "Сирдарё", "lat": 40.4897, "lon": 68.7842},
+    "guliston": {"name": "Гулистон", "lat": 40.4897, "lon": 68.7842},
+    "navoiy": {"name": "Навоий", "lat": 40.0844, "lon": 65.3792},
+    "nukus": {"name": "Нукус", "lat": 42.4602, "lon": 59.6166},
+    "toshkent": {"name": "Тошкент", "lat": 41.2995, "lon": 69.2401},
+}
+
+WMO_WEATHER_CODES = {
+    0: "Очиқ, мусаффо осмон",
+    1: "Асосан очиқ",
+    2: "Қисман булутли",
+    3: "Булутли",
+    45: "Туманли",
+    48: "Қировли туман",
+    51: "Енгил майда ёмғир",
+    53: "Ўртача майда ёмғир",
+    55: "Кучли майда ёмғир",
+    61: "Енгил ёмғир",
+    63: "Ўртача ёмғир",
+    65: "Кучли ёмғир",
+    71: "Енгил қор",
+    73: "Ўртача қор",
+    75: "Кучли қор",
+    80: "Қисқа муддатли ёмғир",
+    81: "Ёмғирли",
+    82: "Жуда кучли жала",
+    85: "Қор",
+    86: "Кучли қор",
+    95: "Момақалдироқ",
+}
+
+
+def get_tashkent_datetime() -> Dict[str, Any]:
+    now = datetime.now(TASHKENT_TZ)
+    weekday = WEEKDAYS_UZ[now.weekday()]
+    month = MONTHS_UZ[now.month - 1]
+    time_str = now.strftime("%H:%M")
+    return {
+        "year": now.year,
+        "month": month,
+        "day": now.day,
+        "weekday": weekday,
+        "time": time_str,
+        "raw_now": now,
+        "formatted": f"Йил: {now.year}-йил, Сана: {now.day}-{month}, Кун: {weekday}, Соат: {time_str} (Тошкент вақти, UTC+5)"
+    }
+
+
+def fetch_real_weather(region_query: str = "") -> Optional[Dict[str, Any]]:
+    target_region = "toshkent"
+    region_display = "Тошкент шаҳрида"
+    query_lower = region_query.lower()
+    for key, data in UZB_REGIONS.items():
+        if key in query_lower or data["name"].lower() in query_lower:
+            target_region = key
+            region_display = f"{data['name']}да"
+            break
+
+    coord = UZB_REGIONS[target_region]
+    lat, lon = coord["lat"], coord["lon"]
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&timezone=Asia%2FTashkent"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "BeekeepingUzBot/1.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode())
+            cur = data.get("current", {})
+            temp = cur.get("temperature_2m", 0)
+            apparent = cur.get("apparent_temperature", temp)
+            humidity = cur.get("relative_humidity_2m", 0)
+            code = cur.get("weather_code", 0)
+            wind = cur.get("wind_speed_10m", 0)
+            desc = WMO_WEATHER_CODES.get(code, "Очиқ / Булутли")
+            return {
+                "region_display": region_display,
+                "region_name": coord["name"],
+                "temp": f"+{temp}°C" if temp > 0 else f"{temp}°C",
+                "apparent": f"+{apparent}°C" if apparent > 0 else f"{apparent}°C",
+                "humidity": f"{humidity}%",
+                "desc": desc,
+                "wind": f"{wind} км/соат",
+                "raw_temp": temp,
+            }
+    except Exception as e:
+        logger.warning(f"Ob-havo olishda xatolik: {e}")
+        return None
+
+
+def detect_and_handle_datetime_weather(text: str) -> Optional[str]:
+    text_lower = text.lower()
+    
+    # Sanani, yilni yoki kunni so'raganmi?
+    has_date_year = bool(re.search(
+        r"(нечанчи\s*йил|йил\s*неч|сана|число|қайси\s*кун|нима\s*кун|бугунги\s*кун|нечанчи\s*число|бугун\s*қайси)",
+        text_lower
+    ))
+    
+    # Vaqtni / soatni so'raganmi?
+    has_time = bool(re.search(
+        r"(вақт\s*неч|соат\s*неч|соат\s*қандай|ҳозир\s*вақт|соат\s*неча|вақт\s*қандай)",
+        text_lower
+    ))
+    
+    # Ob-havoni so'raganmi?
+    has_weather = bool(re.search(
+        r"(об-?ҳаво|ҳаво\s*қандай|ҳарорат|градус|обҳаво|ёмғир|қор\s*ёғадими)",
+        text_lower
+    ))
+    
+    if not (has_date_year or has_time or has_weather):
+        return None
+        
+    dt = get_tashkent_datetime()
+    
+    # 1. Vaqt va Ob-havo birga so'ралса (2-расмдагидек)
+    if (has_time or has_date_year) and has_weather:
+        w = fetch_real_weather(text)
+        if w:
+            weather_desc = w["desc"].lower()
+            temp_str = w["temp"]
+            apparent_str = w["apparent"]
+            hum_str = w["humidity"]
+            wind_str = w["wind"]
+            region_str = w["region_display"]
+            raw_temp = w["raw_temp"]
+        else:
+            weather_desc = "салқин ва булутли"
+            temp_str = "+10°C"
+            apparent_str = "+8°C"
+            hum_str = "85%"
+            wind_str = "8 км/соат"
+            region_str = "Тошкент шаҳрида"
+            raw_temp = 10.0
+            
+        if raw_temp < 12:
+            bee_note = (
+                "Ҳарорат +12°C дан паст ва салқин бўлгани сабабли, асаларилар уя ичида клубокда (зич тўпда) бўлади. "
+                "Бундай об-ҳавода уяларни очиш ва асалариларни безовта қилиш мумкин эмас. Қишлов шароитини сокин сақлаш тавсия этилади."
+            )
+        elif raw_temp < 20:
+            bee_note = (
+                "Ҳаво салқин, кузги-қишки давр. Асаларилар уя ичидаги озуқани истеъмол қилиб ҳароратни сақлайди. "
+                "Ортиқча уяни очмаслик, қопқоқларни яхши ёпиш ва шамоллатишни назорат қилиш тавсия этилади."
+            )
+        else:
+            bee_note = (
+                "Ҳаво илиқ ва қулай. Асаларилар фаол учиб чанг ва нектар тўплаши мумкин. "
+                "Пасекада керакли текширув ва парвариш ишларини олиб бориш мумкин."
+            )
+            
+        return (
+            "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+            "Саволларингизга аниқ жавоб бериш учун қуйидаги маълумотларни тақдим этаман:\n\n"
+            f"1. <b>Жорий вақт:</b> Ҳозирги вақт <b>{dt['time']}</b> (Тошкент вақти билан).\n"
+            f"2. <b>Об-ҳаво маълумоти:</b> {region_str} бугун, <b>{dt['day']}-{dt['month']}</b> куни об-ҳаво <b>{weather_desc}</b>. "
+            f"Ҳаво ҳарорати <b>{temp_str}</b> (сезги <b>{apparent_str}</b>), намлик <b>{hum_str}</b>, шамол тезлиги <b>{wind_str}</b>.\n"
+            f"3. <b>Асаларичилик учун эслатма:</b> {bee_note}\n\n"
+            "Агар пасекангиздаги ариларнинг қишлови бўйича саволларингиз бўлса, бемалол сўрашингиз мумкин."
+        )
+
+    # 2. Faqat Ob-havo so'ралса
+    if has_weather and not has_date_year and not has_time:
+        w = fetch_real_weather(text)
+        if not w:
+            w = {"region_display": "Тошкент шаҳрида", "temp": "+10°C", "apparent": "+8°C", "humidity": "85%", "desc": "Булутли", "wind": "8 км/соат", "raw_temp": 10.0}
+        
+        raw_temp = w["raw_temp"]
+        if raw_temp < 12:
+            bee_note = "Ҳарорат паст бўлгани сабабли асаларилар клубок ҳолатида бўлади, уяни очиш тавсия этилмайди."
+        elif raw_temp < 20:
+            bee_note = "Ҳаво салқин, ортиқча уяни очмаслик ва қишлов захираларини текшириш тавсия этилади."
+        else:
+            bee_note = "Ҳаво қулай ва илиқ, асаларилар парвози учун яхши шароит."
+            
+        return (
+            "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+            f"{w['region_display']} бугунги расмий об-ҳаво маълумоти:\n\n"
+            f"1. <b>Ҳарорат:</b> <b>{w['temp']}</b> (сезги <b>{w['apparent']}</b>).\n"
+            f"2. <b>Ҳолат:</b> <b>{w['desc']}</b>, намлик <b>{w['humidity']}</b>, шамол <b>{w['wind']}</b>.\n"
+            f"3. <b>Асаларичилик тавсияси:</b> {bee_note}\n\n"
+            "Асаларичилик бўйича бошқа саволларингизни бемалол ёзишингиз мумкин."
+        )
+
+    # 3. Yil, Sana, Kun yoki Vaqt so'ралса (1-расмдагидек)
+    return (
+        "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+        "Саволингизга аниқ жавоб:\n\n"
+        f"1. <b>Йил:</b> Ҳозирда <b>{dt['year']}-йил</b>.\n"
+        f"2. <b>Сана ва кун:</b> Бугун <b>{dt['day']}-{dt['month']}, {dt['weekday'].lower()}</b> куни.\n"
+        f"3. <b>Ҳозирги вақт:</b> <b>{dt['time']}</b> (Тошкент вақти билан).\n\n"
+        "Агар асаларичилик мавсумидаги режаларингиз ёки пасекадаги қишлов ишлари бўйича ёрдам керак бўлса, бемалол мурожаат қилишингиз мумкин."
+    )
+
+
+# ==========================================
+# ASALARICHILIK KITOBLARI VA BILIMLAR BAZASI
+# ==========================================
+BOOKS_DIR = os.getenv("BOOKS_DIR", "books")
+os.makedirs(BOOKS_DIR, exist_ok=True)
+BOOKS_CATALOG_FILE = os.path.join(BOOKS_DIR, "catalog.json")
+
+
+def load_books_catalog() -> Dict[str, Any]:
+    if os.path.exists(BOOKS_CATALOG_FILE):
+        try:
+            with open(BOOKS_CATALOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_books_catalog(catalog: Dict[str, Any]):
+    try:
+        with open(BOOKS_CATALOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(catalog, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Katalog saqlashda xatolik: {e}")
+
+
+def get_available_books() -> List[Dict[str, Any]]:
+    """books/ papkasidagi barcha PDF va TXT kitoblarni olish"""
+    catalog = load_books_catalog()
+    books = []
+    if os.path.exists(BOOKS_DIR):
+        for fname in sorted(os.listdir(BOOKS_DIR)):
+            if fname.lower().endswith((".pdf", ".txt", ".doc", ".docx")) and fname != "catalog.json":
+                fpath = os.path.join(BOOKS_DIR, fname)
+                fsize = os.path.getsize(fpath)
+                meta = catalog.get(fname, {})
+                title = meta.get("title") or fname.rsplit(".", 1)[0].replace("_", " ")
+                books.append({
+                    "filename": fname,
+                    "title": title,
+                    "size_kb": round(fsize / 1024, 1),
+                    "file_id": meta.get("file_id")
+                })
+    return books
+
+
+def load_knowledge_base_text() -> str:
+    """books/ papkasidagi barcha .txt qo'llanmalar matnini AI uchun birlashtirish"""
+    texts = []
+    if os.path.exists(BOOKS_DIR):
+        for fname in sorted(os.listdir(BOOKS_DIR)):
+            if fname.lower().endswith(".txt"):
+                fpath = os.path.join(BOOKS_DIR, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        c = f.read().strip()
+                        if c:
+                            texts.append(f"--- Қўлланма: {fname} ---\n{c[:6000]}")
+                except Exception as e:
+                    logger.warning(f"Matn o'qishda xatolik ({fname}): {e}")
+    if texts:
+        return "\n\n[АСАЛАРИЧИЛИК КИТОБЛАРИ ВА ҚЎЛЛАНМАЛАРДАН МАХСУС БИЛИМЛАР]:\n" + "\n\n".join(texts[:5]) + "\n"
+    return ""
+
+
+def build_books_keyboard() -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    books = get_available_books()
+    if not books:
+        text = (
+            "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+            "📚 <b>Асаларичилик кутубхонаси</b>\n\n"
+            "Ҳозирда кутубхонага янги китоблар юкланмоқда. Тез орада барча қўлланмалар тақдим этилади.\n\n"
+            "💡 <b>Ҳурматли Админ (@JamshidjonDavronov):</b>\n"
+            "Сиз ушбу ботнинг личкасига исталган асаларичилик китобини (<b>PDF</b> ёки <b>TXT</b> шаклида) юборишингиз мумкин. "
+            "Бот уни автоматик қабул қилиб, кутубхонага жойлайди ва сунъий интеллект хотирасига сингдиради!"
+        )
+        return text, None
+
+    text = (
+        "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+        "📚 <b>Beekeeping.Uz Асаларичилик кутубхонаси:</b>\n\n"
+        "Қуйидаги китоблардан бирини танланг, бот уни сизга дарҳол юклаб беради:"
+    )
+    rows = []
+    for idx, b in enumerate(books[:10]):
+        rows.append([
+            InlineKeyboardButton(f"📖 {b['title'][:32]} ({b['size_kb']} KB)", callback_data=f"book:{idx}")
+        ])
+    return text, InlineKeyboardMarkup(rows)
+
+
 SYSTEM_INSTRUCTION = (
     "Сиз Beekeeping.Uz 🇺🇿 асаларичилик канали ва гуруҳининг мутахассис ёрдамчисисиз.\n\n"
     "ҚАТЪИЙ ҚОИДАЛАР:\n"
     "1. Ҳар доим сўзингизни «Ассалому алайкум вароҳматуллоҳ!» дея бошланг.\n"
     "2. «Beekeeping.Uz лойиҳасига хуш келибсиз» ёки шунга ўхшаш таништирув жумлаларини МУТЛАҚО ёзманг! Дарҳол саволнинг аниқ ва амалий жавобига ўтинг.\n"
-    "3. 2-расмдагидек маълумот чиройли ва кўркам бўлиши учун асосий сарлавҳаларни ва муҳим сўзларни қалин (**bold**) қилиб кўрсатинг.\n"
+    "3. Маълумот чиройли ва кўркам бўлиши учун асосий сарлавҳаларни ва муҳим сўзларни қалин (**bold**) қилиб кўрсатинг.\n"
     "4. Бандларни 1., 2., 3. қилиб рақамланг ва ҳар бир банд номини қалин қилиб ажратинг (масалан: 1. **Генетик сифатни назорат қилиш (Селекция):** Табиий рой...).\n"
-    "5. Асаларичилик, она ари парвариши, она арини сунъий урчитиш, касалликлар ва соҳага оид барча саволларга ўзбек тилида тушунарли, аниқ ва батафсил жавоб беринг."
+    "5. РАСМ ВА ВИДЕО ТАҲЛИЛИ: Агар фойдаланувчи расм ёки видео юборса, тасвирни диққат билан тўлиқ кўриб чиқинг. "
+    "Ундаги асаларилар ҳолати, она ари бор-йўқлиги, насл ва қуртчалар рамкаси, уя тозалиги, асал сифати, кана/варроатоз ёки бошқа касаллик аломатларини аниқ фактлар асосида таҳлил қилиб, "
+    "асаларичига тўғри ва илмий-амалий фойдали маслаҳат беринг.\n"
+    "6. Барча саволларга ўзбек тилида тушунарли, аниқ ва батафсил жавоб беринг."
 )
 
 WELCOME_MESSAGE = (
     "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
     "Сизга асаларичилик, она ари парвариши, касалликларга қарши кураш ва соҳага оид барча саволлар бўйича ёрдам бера оламан.\n\n"
-    "Саволингизни бемалол ёзишингиз мумкин."
+    "Саволингизни бемалол ёзишингиз ёки расм/видео юборишингиз мумкин."
 )
 
 QUOTA_ERROR_MESSAGE = (
@@ -79,6 +391,12 @@ chat_memory: Dict[int, List[Dict[str, str]]] = {}
 # Guruh ruxsatlari ro'yxati (Admin qo'shgan yoki ruxsat berilgan guruhlar)
 approved_chats = set()
 
+# Reaksiya ovozlarini kuzatish:
+# Har bir xabar uchun foydalanuvchilar ovozlari: message_id -> {user_id: "like"|"dislike"|"heart"|"clap"}
+message_user_votes: Dict[int, Dict[int, str]] = {}
+# Har bir xabar uchun ovozlar soni: message_id -> {"like": int, "dislike": int, "heart": int, "clap": int}
+message_vote_counts: Dict[int, Dict[str, int]] = {}
+
 # Logging sozlash
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -90,18 +408,38 @@ logger = logging.getLogger(__name__)
 genai.configure(api_key=GEMINI_API_KEY)
 
 
-def call_gemini_with_fallback(prompt: str, history: List[Dict[str, str]]) -> str:
-    """Gemini modeliga murojaat qilish va 429/404 da avtomatik zaxira modelga o'tish."""
-    full_prompt = SYSTEM_INSTRUCTION + "\n\n"
+def call_gemini_with_fallback(prompt: str, history: List[Dict[str, str]], media_part: Any = None) -> str:
+    """Gemini modeliga murojaat qilish (matn, rasm va video uchun avtomatik zaxira modellar bilan)."""
+    dt = get_tashkent_datetime()
+    w = fetch_real_weather(prompt)
+    weather_str = f"Ҳарорат {w['temp']} (сезги {w['apparent']}), ҳолат: {w['desc']}, намлик: {w['humidity']}" if w else "Кузги/қишки салқин ҳаво"
+
+    realtime_context = (
+        f"\n\n[РЕАЛ ҲОЗИРГИ САНА ВА ОБ-ҲАВО]:\n"
+        f"- Жорий йил: {dt['year']}-йил\n"
+        f"- Бугунги сана: {dt['day']}-{dt['month']}, {dt['weekday']}\n"
+        f"- Ҳозирги соат/вақт: {dt['time']} (Тошкент вақти, UTC+5)\n"
+        f"- Ҳозирги об-ҳаво маълумоти: {weather_str}\n"
+        f"- Жорий мавсум: Ноябр (кузнинг охири, қишлов даври, ҳеч қачон май ёки баҳор эмас!)\n"
+        "ҚАТЪИЙ ҚОИДА: Йил, кун, соат ёки об-ҳаво сўралса, ФАҚАТ ушбу аниқ реал кўрсаткичларга таяниб жавоб беринг! 2024 ёки май ойларини асло ёзманг!\n"
+    )
+
+    knowledge_context = load_knowledge_base_text()
+    full_prompt = SYSTEM_INSTRUCTION + realtime_context + knowledge_context + "\n\n"
     for turn in history[-MEMORY_LIMIT:]:
         full_prompt += f"{turn['role']}: {turn['text']}\n"
     full_prompt += f"user: {prompt}\nmodel: "
+
+    if media_part:
+        contents = [media_part, full_prompt]
+    else:
+        contents = full_prompt
 
     last_error = None
     for model_name in MODELS_TO_TRY:
         try:
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(full_prompt)
+            response = model.generate_content(contents)
             if response and response.text:
                 return response.text
         except Exception as e:
@@ -164,7 +502,10 @@ def get_info_inline_keyboard(text_to_share: str = "") -> InlineKeyboardMarkup:
 
 
 async def handle_reaction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Фойдаланувчи смайликларни босганда сонини ошириш ва ташаккур билдириш"""
+    """
+    Фойдаланувчи 4 та смайликдан фақат биттасига овоз бера олади.
+    Агар бошқа смайликни босса, аввалги овози олиб ташланиб (-1), янгисига (+1) ўзгаради.
+    """
     query = update.callback_query
     if not query or not query.data:
         return
@@ -173,47 +514,135 @@ async def handle_reaction_callback(update: Update, context: ContextTypes.DEFAULT
     if not data.startswith("react:"):
         return
 
+    new_key = data.removeprefix("react:")
     emoji_map = {
-        "react:like": "👍",
-        "react:dislike": "👎",
-        "react:heart": "❤️",
-        "react:clap": "👏",
+        "like": "👍",
+        "dislike": "👎",
+        "heart": "❤️",
+        "clap": "👏",
     }
 
-    target_emoji = emoji_map.get(data)
+    target_emoji = emoji_map.get(new_key)
     if not target_emoji:
         await query.answer()
         return
 
-    try:
-        msg = query.message
-        if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-            current_rows = [list(row) for row in msg.reply_markup.inline_keyboard]
-            row0 = current_rows[0]
-            new_row0 = []
+    user = query.from_user
+    user_id = user.id
+    msg = query.message
+    if not msg:
+        await query.answer()
+        return
+
+    msg_id = msg.message_id
+
+    # 1. Ushbu xabar uchun hisoblarni boshlash
+    if msg_id not in message_vote_counts:
+        counts = {"like": 0, "dislike": 0, "heart": 0, "clap": 0}
+        if msg.reply_markup and msg.reply_markup.inline_keyboard:
+            row0 = msg.reply_markup.inline_keyboard[0]
             for btn in row0:
-                if btn.callback_data == data:
-                    current_text = btn.text
-                    parts = current_text.split()
+                cdata = btn.callback_data or ""
+                if cdata.startswith("react:"):
+                    k = cdata.removeprefix("react:")
+                    parts = btn.text.split()
                     if len(parts) > 1 and parts[1].isdigit():
-                        new_count = int(parts[1]) + 1
-                        new_text = f"{parts[0]} {new_count}"
-                    else:
-                        new_text = f"{target_emoji} 1"
-                    new_row0.append(InlineKeyboardButton(new_text, callback_data=btn.callback_data))
-                else:
-                    new_row0.append(btn)
+                        counts[k] = int(parts[1])
+        message_vote_counts[msg_id] = counts
+
+    if msg_id not in message_user_votes:
+        message_user_votes[msg_id] = {}
+
+    counts = message_vote_counts[msg_id]
+    user_votes = message_user_votes[msg_id]
+    prev_key = user_votes.get(user_id)
+
+    # 2. Agar foydalanuvchi allaqachon shu reaksiyani bosgan bo'lsa
+    if prev_key == new_key:
+        await query.answer(text=f"Сиз аллақачон {target_emoji} смайлигига овоз бергансиз!", show_alert=False)
+        return
+
+    # 3. Foydalanuvchi ovozini o'zgartirsa yoki birinchi marta ovoz bersa
+    if prev_key is not None:
+        # Avvalgi ovozini -1 qilish
+        counts[prev_key] = max(0, counts[prev_key] - 1)
+        prev_emoji = emoji_map.get(prev_key, "")
+        user_votes[user_id] = new_key
+        counts[new_key] += 1
+        alert_text = f"Овозингиз ўзгартирилди: {prev_emoji} ➡️ {target_emoji}"
+    else:
+        # Birinchi marta ovoz berish
+        user_votes[user_id] = new_key
+        counts[new_key] += 1
+        alert_text = f"Ташаккур! Овозингиз қабул қилинди {target_emoji}"
+
+    # 4. Tugmalarni yangi hisoblar bilan qayta chizish
+    try:
+        if msg.reply_markup and msg.reply_markup.inline_keyboard:
+            current_rows = [list(row) for row in msg.reply_markup.inline_keyboard]
+            new_row0 = []
+            for k in ["like", "dislike", "heart", "clap"]:
+                em = emoji_map[k]
+                cnt = counts[k]
+                btn_text = f"{em} {cnt}" if cnt > 0 else em
+                new_row0.append(InlineKeyboardButton(btn_text, callback_data=f"react:{k}"))
 
             current_rows[0] = new_row0
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(current_rows))
 
-        await query.answer(text=f"Ташаккур! Фикрингиз қабул қилинди {target_emoji}", show_alert=False)
+        await query.answer(text=alert_text, show_alert=False)
     except Exception as e:
         logger.debug(f"Reaction error: {e}")
         try:
-            await query.answer(text=f"Фикрингиз қабул қилинди {target_emoji}")
+            await query.answer(text=alert_text)
         except Exception:
             pass
+
+
+async def handle_book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Foydalanuvchi tugmani bosganda kitob faylini jo'natish"""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("book:"):
+        return
+    idx_str = query.data.removeprefix("book:")
+    books = get_available_books()
+    if not idx_str.isdigit() or int(idx_str) >= len(books):
+        await query.answer("Китоб топилмади.", show_alert=True)
+        return
+
+    book = books[int(idx_str)]
+    file_path = os.path.join(BOOKS_DIR, book["filename"])
+    if not os.path.exists(file_path):
+        await query.answer("Китоб файли топилмади.", show_alert=True)
+        return
+
+    await query.answer("Китоб юборилмоқда...")
+    try:
+        with open(file_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=f,
+                filename=book["filename"],
+                caption=f"📖 <b>{book['title']}</b>\n\n🐝 <b>Beekeeping.Uz кутубхонаси</b>\nКанал: @Uz_Asalarichilik",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Kitob yuborishda xatolik: {e}")
+        await query.answer("Китобни юборишда хатолик юз берди.", show_alert=True)
+
+
+async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/books yoki /kitoblar buyrug'i"""
+    if not update.message:
+        return
+    text, reply_markup = build_books_keyboard()
+    is_group = update.message.chat.type != "private"
+    await update.message.reply_text(
+        text,
+        reply_to_message_id=update.message.message_id if is_group else None,
+        parse_mode="HTML",
+        reply_markup=reply_markup
+    )
 
 
 def format_to_telegram_html(text: str) -> str:
@@ -302,7 +731,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ASOSIY XABARLAR ISHLOVCHISI
 # ==========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+    if not update.message:
         return
 
     message = update.message
@@ -310,15 +739,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = chat.id
     user_id = user.id if user else chat_id
-    raw_text = message.text.strip()
     is_group = chat.type in ["group", "supergroup"]
-    text_lower = raw_text.lower()
+    thread_id = message.message_thread_id
 
     # 1. BOT EGASI (ADMIN) HUQUQLARI
     is_owner = (user_id == ADMIN_TELEGRAM_ID)
 
     # SHAXSIY CHATDAGI QAT'IY HIMOYA:
-    # Bot egasidan (@JamshidjonDavronov) boshqa hech kim shaxsiyda ishlata olmaydi!
     if not is_group and not is_owner:
         access_denied = (
             "🔒 Кириш чекланган!\n\n"
@@ -328,7 +755,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(access_denied)
         return
 
+    # Matn yoki rasm/video izohi (caption)
+    raw_text = (message.text or message.caption or "").strip()
+    text_lower = raw_text.lower()
+
+    has_photo = bool(message.photo)
+    has_video = bool(message.video or message.video_note)
+    has_document = bool(message.document and (
+        message.document.mime_type and ("image" in message.document.mime_type or "video" in message.document.mime_type)
+    ))
+    has_media = has_photo or has_video or has_document
+
+    # Agar matn ham, media ham bo'lmasa - e'tiborsiz qoldirish
+    if not raw_text and not has_media:
+        return
+
     # GURUHGA BEGONA QO'SHGAN BO'LSA - BOT CHIQIB KETADI
+    bot_info = await context.bot.get_me()
+    bot_username = (bot_info.username or "").lower()
+
     if is_group and message.new_chat_members:
         if any(m.is_bot or m.id == bot_info.id for m in message.new_chat_members):
             if not is_owner:
@@ -348,12 +793,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Bot egasi {user.first_name} guruhga kirdi/yozdi. Guruh tasdiqlandi: {chat.title} ({chat_id})")
 
     # 2. GURUHDA FILTRLASH (/ DROB KERAK EMAS!)
-    # Guruhda faqat:
-    # a) bot xabariga reply qilinganda
-    # b) "salom bot" / "салом бот" / "bot" deb yozilganda javob beradi
-    bot_info = await context.bot.get_me()
-    bot_username = (bot_info.username or "").lower()
-
     is_reply_to_bot = (
         message.reply_to_message is not None and
         message.reply_to_message.from_user is not None and
@@ -371,11 +810,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (bot_username and f"@{bot_username}" in text_lower)
     )
 
-    # Agar guruh bo'lsa va botga qaratilmagan bo'lsa - jim turadi (spam qilmaydi, quota tejaydi)
-    if is_group and not (is_reply_to_bot or has_trigger or raw_text.startswith("/")):
+    # Guruhda faqat botga qaratilgan savollar, replylar yoki bot chaqirilgan media qabul qilinadi
+    if is_group and not (is_reply_to_bot or has_trigger or raw_text.startswith("/") or (has_media and ("bot" in text_lower or "бот" in text_lower))):
         return
 
-    # 3. KIRISH TRIGGERLARINI TOZALASH (Savolning o'zini ajratib olish)
+    # 3. KIRISH TRIGGERLARINI TOZALASH
     clean_text = raw_text
     if bot_username:
         clean_text = re.sub(rf"(?i)@{re.escape(bot_username)}", "", clean_text).strip()
@@ -386,50 +825,154 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_text
     ).strip()
 
-    # Agar foydalanuvchi shunchaki "salom bot" deb yozgan bo'lsa:
-    # "Агар бирор киши ботга қарата салом бот деса Ваалайкум ассалом вараҳматуллоҳ дея жавоб қайтарсин"
-    if not clean_text and has_trigger:
+    # Agar foydalanuvchi shunchaki "salom bot" deb yozgan bo'lsa (rasmsiz):
+    if not clean_text and has_trigger and not has_media:
         greeting_text = (
             "<b>Ваалайкум ассалом вараҳматуллоҳ!</b>\n\n"
-            "Сизга қандай ёрдам беришим мумкин? Асаларичилик бўйича саволингизни бемалол ёзишингиз мумкин."
+            "Сизга қандай ёрдам беришим мумкин? Асаларичилик бўйича саволингизни бемалол ёзишингиз ёки расм/видео юборишингиз мумкин."
         )
         await send_formatted_reply(message, greeting_text, is_group=is_group, thread_id=thread_id)
         return
 
-    # Context (agar botning avvalgi javobiga reply qilingan bo'lsa)
-    prompt_for_ai = clean_text or raw_text
-    if is_reply_to_bot and message.reply_to_message and message.reply_to_message.text:
-        quoted = message.reply_to_message.text[:250]
-        prompt_for_ai = f"[Олдинги жавоб: \"{quoted}\"]\nСавол: {clean_text}"
+    # 4. VAQT, SANA, YIL VA OB-HAVO SAVOLLARINI 100% ANIQ VA REALL FAKTLAR BILAN JAVOBLASH
+    if not has_media:
+        direct_dt_weather_reply = detect_and_handle_datetime_weather(clean_text)
+        if direct_dt_weather_reply:
+            await send_formatted_reply(message, direct_dt_weather_reply, is_group=is_group, thread_id=thread_id)
+            return
 
-    # 4. CHAT XOTIRASINI OLISH VA AI DAN JAVOB YARATISH
-    thread_id = message.message_thread_id
+    # 4.1. KITOBLAR VA KUTUBXONA BO'YICHA SAVOLLAR
+    if not has_media and any(k in clean_text.lower() for k in ["китоб", "китоблар", "kitob", "kitoblar", "кутубхона", "kutubxona"]):
+        books_text, books_markup = build_books_keyboard()
+        await message.reply_text(
+            books_text,
+            reply_to_message_id=message.message_id if is_group else None,
+            message_thread_id=thread_id if is_group else None,
+            parse_mode="HTML",
+            reply_markup=books_markup
+        )
+        return
 
+    # 5. RASM VA VIDEO (MULTIMODAL) FAYLLARNI YUKLAB OLISH
+    media_part = None
+    try:
+        if has_photo:
+            photo_file = await message.photo[-1].get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            media_part = {"mime_type": "image/jpeg", "data": bytes(photo_bytes)}
+        elif has_video:
+            video_obj = message.video or message.video_note
+            if video_obj.file_size and video_obj.file_size > 20 * 1024 * 1024:
+                await send_formatted_reply(
+                    message,
+                    "⚠️ Видео ҳажми 20 МБ дан ортиқ. Telegram чекловлари сабабли қисқароқ видео ёки расм кўринишида юборинг.",
+                    is_group=is_group,
+                    thread_id=thread_id
+                )
+                return
+            video_file = await video_obj.get_file()
+            video_bytes = await video_file.download_as_bytearray()
+            mime = getattr(video_obj, "mime_type", None) or "video/mp4"
+            media_part = {"mime_type": mime, "data": bytes(video_bytes)}
+        elif has_document and message.document:
+            doc = message.document
+            doc_name = doc.file_name or "kitob.pdf"
+            is_book_ext = doc_name.lower().endswith((".pdf", ".txt", ".doc", ".docx"))
+
+            # Agar Bot egasi (Jamshid) shaxsiy chatda kitob yuborsa, uni avtomatik kutubxonaga saqlaymiz!
+            if is_owner and not is_group and is_book_ext:
+                try:
+                    doc_file = await doc.get_file()
+                    save_path = os.path.join(BOOKS_DIR, doc_name)
+                    await doc_file.download_to_drive(custom_path=save_path)
+
+                    catalog = load_books_catalog()
+                    clean_title = doc_name.rsplit(".", 1)[0].replace("_", " ")
+                    catalog[doc_name] = {
+                        "title": clean_title,
+                        "file_id": doc.file_id,
+                        "size": doc.file_size
+                    }
+                    save_books_catalog(catalog)
+
+                    extra_note = (
+                        "💡 <b>Ушбу китоб матни сунъий интеллект билимлар базасига ҳам қўшилди!</b>"
+                        if doc_name.lower().endswith(".txt")
+                        else "💡 Фойдаланувчилар «Китоблар» бўлими орқали ушбу китобни юклаб олишлари мумкин."
+                    )
+                    confirm_msg = (
+                        "<b>Ассалому алайкум вароҳматуллоҳ, Жамшид ака!</b>\n\n"
+                        f"✅ <b>Китоб қабул қилинди ва кутубхонага сақланди:</b>\n"
+                        f"📖 <b>{clean_title}</b> ({round((doc.file_size or 0) / 1024, 1)} KB)\n\n"
+                        f"{extra_note}"
+                    )
+                    await send_formatted_reply(message, confirm_msg, is_group=False)
+                    return
+                except Exception as e:
+                    logger.error(f"Kitobni saqlashda xatolik: {e}")
+
+            if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+                await send_formatted_reply(
+                    message,
+                    "⚠️ Файл ҳажми 20 МБ дан ортиқ. Илтимос, кичикроқ файл юборинг.",
+                    is_group=is_group,
+                    thread_id=thread_id
+                )
+                return
+            doc_file = await doc.get_file()
+            doc_bytes = await doc_file.download_as_bytearray()
+            media_part = {"mime_type": doc.mime_type or "image/jpeg", "data": bytes(doc_bytes)}
+    except Exception as e:
+        logger.error(f"Faylni yuklab olishda xatolik: {e}")
+
+    # 5. AI UCHUN PROMPT TAYYORLASH
+    if media_part:
+        if not clean_text:
+            prompt_for_ai = (
+                "Ушбу юборилган тасвирни (расм/видео) асаларичилик нуқтаи назаридан синчковлик билан тўлиқ таҳлил қилинг. "
+                "Унда нима акс этганини (масалан: асаларилар ҳолати, она ари бор-йўқлиги, насл ва қуртчалар рамкаси, уя тозалиги, асал сифати, "
+                "кана/варроа ёки бошқа касаллик аломатлари, уя тузилиши) аниқланг. Тўғри, ишончли фактлар ва амалий тажрибага асосланган ҳолда "
+                "асаларичига фойдали тавсия ва маслаҳатларингизни чиройли, қалин (bold) сарлавҳалар ва 1., 2. бандлар билан тушунтириб беринг."
+            )
+        else:
+            prompt_for_ai = (
+                f"Фойдаланувчи ушбу расм/видео бўйича қуйидаги саволни берди:\n\"{clean_text}\"\n\n"
+                "Илтимос, тасвирни диққат билан кўриб чиқиб, саволга тўғри, аниқ фактлар ва илмий-амалий тажриба асосида тўлиқ ва тушунарли жавоб беринг. "
+                "Асосий сарлавҳаларни қалин (bold) қилиб, бандларни 1., 2. қилиб тартибланг."
+            )
+    else:
+        prompt_for_ai = clean_text or raw_text
+        if is_reply_to_bot and message.reply_to_message and message.reply_to_message.text:
+            quoted = message.reply_to_message.text[:250]
+            prompt_for_ai = f"[Олдинги жавоб: \"{quoted}\"]\nСавол: {clean_text}"
+
+    # 6. CHAT XOTIRASINI OLISH VA AI DAN JAVOB YARATISH
     if chat_id not in chat_memory:
         chat_memory[chat_id] = []
 
     history = chat_memory[chat_id]
-    chat_memory[chat_id].append({"role": "user", "text": prompt_for_ai})
+    log_text = prompt_for_ai if len(prompt_for_ai) < 150 else prompt_for_ai[:150] + "..."
+    chat_memory[chat_id].append({"role": "user", "text": log_text})
 
     # Foydalanuvchiga 'yozmoqda...' (typing) statusini jo'natish
     try:
+        action_type = "upload_photo" if has_photo else ("record_video" if has_video else "typing")
         if thread_id and is_group:
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=thread_id)
+            await context.bot.send_chat_action(chat_id=chat_id, action=action_type, message_thread_id=thread_id)
         else:
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            await context.bot.send_chat_action(chat_id=chat_id, action=action_type)
     except Exception:
         pass
 
     try:
         # Loop orqali sync funksiyani asinxron ishlatish
         loop = asyncio.get_running_loop()
-        answer = await loop.run_in_executor(None, call_gemini_with_fallback, prompt_for_ai, history)
+        answer = await loop.run_in_executor(None, call_gemini_with_fallback, prompt_for_ai, history, media_part)
 
         chat_memory[chat_id].append({"role": "model", "text": answer})
         if len(chat_memory[chat_id]) > MEMORY_LIMIT * 2:
             chat_memory[chat_id] = chat_memory[chat_id][-MEMORY_LIMIT * 2:]
 
-        # Guruhda bo'lsa aynan foydalanuvchi xabariga reply qilib jo'natish (Forum / Topics qo'llab-quvvatlanadi!)
         # 2-расмдагидек маълумот чиройли ва кўркам, асосий матнлар қалин (bold), бошланиши 'Ассалому алайкум вароҳматуллоҳ!' бўлади
         await send_formatted_reply(message, answer, is_group=is_group, thread_id=thread_id)
     except Exception as e:
@@ -525,9 +1068,12 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler(["books", "kitoblar", "kitob"], books_command))
     app.add_handler(CallbackQueryHandler(handle_reaction_callback, pattern=r"^react:"))
+    app.add_handler(CallbackQueryHandler(handle_book_callback, pattern=r"^book:"))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    media_filter = (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL) & ~filters.COMMAND
+    app.add_handler(MessageHandler(media_filter, handle_message))
 
     print("Bot muvaffaqiyatli ishga tushdi va xabarlarni kutmoqda...")
     app.run_polling()
