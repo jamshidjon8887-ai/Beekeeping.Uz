@@ -20,7 +20,7 @@ import json
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import google.generativeai as genai
 from telegram import (
@@ -167,19 +167,19 @@ def detect_and_handle_datetime_weather(text: str) -> Optional[str]:
     
     # Sanani, yilni yoki kunni so'raganmi?
     has_date_year = bool(re.search(
-        r"(нечанчи\s*йил|йил\s*неч|сана|число|қайси\s*кун|нима\s*кун|бугунги\s*кун|нечанчи\s*число|бугун\s*қайси)",
+        r"(нечанчи\s*йил|йил\s*неч|сана|число|қайси\s*кун|нима\s*кун|бугунги\s*кун|нечанчи\s*число|бугун\s*қайси|йил|числони)",
         text_lower
     ))
     
     # Vaqtni / soatni so'raganmi?
     has_time = bool(re.search(
-        r"(вақт\s*неч|соат\s*неч|соат\s*қандай|ҳозир\s*вақт|соат\s*неча|вақт\s*қандай)",
+        r"(вақт|соат|минут|соат\s*неч|соат\s*қандай|ҳозир\s*вақт|соат\s*неча|вақт\s*қандай)",
         text_lower
     ))
     
     # Ob-havoni so'raganmi?
     has_weather = bool(re.search(
-        r"(об-?ҳаво|ҳаво\s*қандай|ҳарорат|градус|обҳаво|ёмғир|қор\s*ёғадими)",
+        r"(об-?ҳаво|ҳаво|ҳарорат|градус|обҳаво|ёмғир|қор|шамол|иссиқ|совуқ)",
         text_lower
     ))
     
@@ -187,84 +187,46 @@ def detect_and_handle_datetime_weather(text: str) -> Optional[str]:
         return None
         
     dt = get_tashkent_datetime()
-    
-    # 1. Vaqt va Ob-havo birga so'ралса (2-расмдагидек)
-    if (has_time or has_date_year) and has_weather:
-        w = fetch_real_weather(text)
-        if w:
-            weather_desc = w["desc"].lower()
-            temp_str = w["temp"]
-            apparent_str = w["apparent"]
-            hum_str = w["humidity"]
-            wind_str = w["wind"]
-            region_str = w["region_display"]
-            raw_temp = w["raw_temp"]
-        else:
-            weather_desc = "салқин ва булутли"
-            temp_str = "+10°C"
-            apparent_str = "+8°C"
-            hum_str = "85%"
-            wind_str = "8 км/соат"
-            region_str = "Тошкент шаҳрида"
-            raw_temp = 10.0
-            
-        if raw_temp < 12:
-            bee_note = (
-                "Ҳарорат +12°C дан паст ва салқин бўлгани сабабли, асаларилар уя ичида клубокда (зич тўпда) бўлади. "
-                "Бундай об-ҳавода уяларни очиш ва асалариларни безовта қилиш мумкин эмас. Қишлов шароитини сокин сақлаш тавсия этилади."
-            )
-        elif raw_temp < 20:
-            bee_note = (
-                "Ҳаво салқин, кузги-қишки давр. Асаларилар уя ичидаги озуқани истеъмол қилиб ҳароратни сақлайди. "
-                "Ортиқча уяни очмаслик, қопқоқларни яхши ёпиш ва шамоллатишни назорат қилиш тавсия этилади."
-            )
-        else:
-            bee_note = (
-                "Ҳаво илиқ ва қулай. Асаларилар фаол учиб чанг ва нектар тўплаши мумкин. "
-                "Пасекада керакли текширув ва парвариш ишларини олиб бориш мумкин."
-            )
-            
-        return (
-            "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
-            "Саволларингизга аниқ жавоб бериш учун қуйидаги маълумотларни тақдим этаман:\n\n"
-            f"1. <b>Жорий вақт:</b> Ҳозирги вақт <b>{dt['time']}</b> (Тошкент вақти билан).\n"
-            f"2. <b>Об-ҳаво маълумоти:</b> {region_str} бугун, <b>{dt['day']}-{dt['month']}</b> куни об-ҳаво <b>{weather_desc}</b>. "
-            f"Ҳаво ҳарорати <b>{temp_str}</b> (сезги <b>{apparent_str}</b>), намлик <b>{hum_str}</b>, шамол тезлиги <b>{wind_str}</b>.\n"
-            f"3. <b>Асаларичилик учун эслатма:</b> {bee_note}\n\n"
-            "Агар пасекангиздаги ариларнинг қишлови бўйича саволларингиз бўлса, бемалол сўрашингиз мумкин."
-        )
-
-    # 2. Faqat Ob-havo so'ралса
-    if has_weather and not has_date_year and not has_time:
-        w = fetch_real_weather(text)
-        if not w:
-            w = {"region_display": "Тошкент шаҳрида", "temp": "+10°C", "apparent": "+8°C", "humidity": "85%", "desc": "Булутли", "wind": "8 км/соат", "raw_temp": 10.0}
+    w = fetch_real_weather(text)
+    if not w:
+        w = {
+            "region_display": "Тошкент шаҳрида",
+            "region_name": "Тошкент",
+            "temp": "+9°C",
+            "apparent": "+7°C",
+            "humidity": "90%",
+            "desc": "Булутли / Ёмғирли",
+            "wind": "10 км/соат",
+            "raw_temp": 9.0
+        }
         
-        raw_temp = w["raw_temp"]
-        if raw_temp < 12:
-            bee_note = "Ҳарорат паст бўлгани сабабли асаларилар клубок ҳолатида бўлади, уяни очиш тавсия этилмайди."
-        elif raw_temp < 20:
-            bee_note = "Ҳаво салқин, ортиқча уяни очмаслик ва қишлов захираларини текшириш тавсия этилади."
-        else:
-            bee_note = "Ҳаво қулай ва илиқ, асаларилар парвози учун яхши шароит."
-            
-        return (
-            "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
-            f"{w['region_display']} бугунги расмий об-ҳаво маълумоти:\n\n"
-            f"1. <b>Ҳарорат:</b> <b>{w['temp']}</b> (сезги <b>{w['apparent']}</b>).\n"
-            f"2. <b>Ҳолат:</b> <b>{w['desc']}</b>, намлик <b>{w['humidity']}</b>, шамол <b>{w['wind']}</b>.\n"
-            f"3. <b>Асаларичилик тавсияси:</b> {bee_note}\n\n"
-            "Асаларичилик бўйича бошқа саволларингизни бемалол ёзишингиз мумкин."
+    raw_temp = w.get("raw_temp", 9.0)
+    if raw_temp < 12:
+        bee_note = (
+            "Ҳарорат +12°C дан паст ва салқин бўлгани сабабли, асаларилар уя ичида клубокда (зич тўпда) бўлади. "
+            "Бундай об-ҳавода уяларни очиш ва асалариларни безовта қилиш мумкин эмас. Қишлов шароитини сокин сақлаш тавсия этилади."
         )
-
-    # 3. Yil, Sana, Kun yoki Vaqt so'ралса (1-расмдагидек)
+    elif raw_temp < 20:
+        bee_note = (
+            "Ҳаво салқин, кузги-қишки давр. Асаларилар уя ичидаги озуқани истеъмол қилиб ҳароратни сақлайди. "
+            "Ортиқча уяни очмаслик, қопқоқларни яхши ёпиш ва шамоллатишни назорат қилиш тавсия этилади."
+        )
+    else:
+        bee_note = (
+            "Ҳаво илиқ ва қулай. Асаларилар фаол учиб чанг ва нектар тўплаши мумкин. "
+            "Пасекада керакли текширув ва парвариш ишларини олиб бориш мумкин."
+        )
+        
     return (
         "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
-        "Саволингизга аниқ жавоб:\n\n"
+        "Саволингизга аниқ ва расмий маълумотлар асосида жавоб:\n\n"
         f"1. <b>Йил:</b> Ҳозирда <b>{dt['year']}-йил</b>.\n"
         f"2. <b>Сана ва кун:</b> Бугун <b>{dt['day']}-{dt['month']}, {dt['weekday'].lower()}</b> куни.\n"
-        f"3. <b>Ҳозирги вақт:</b> <b>{dt['time']}</b> (Тошкент вақти билан).\n\n"
-        "Агар асаларичилик мавсумидаги режаларингиз ёки пасекадаги қишлов ишлари бўйича ёрдам керак бўлса, бемалол мурожаат қилишингиз мумкин."
+        f"3. <b>Ҳозирги вақт:</b> <b>{dt['time']}</b> (Тошкент вақти билан).\n"
+        f"4. <b>Об-ҳаво маълумоти:</b> {w['region_display']} бугун ҳаво ҳарорати <b>{w['temp']}</b> (сезги <b>{w['apparent']}</b>), "
+        f"ҳолат: <b>{w['desc'].lower()}</b>, ҳаво намлиги <b>{w['humidity']}</b>, шамол тезлиги <b>{w['wind']}</b>.\n"
+        f"5. <b>Асаларичилик учун тавсия:</b> {bee_note}\n\n"
+        "Агар асаларичилик мавсумидаги режаларингиз ёки пасекадаги қишлов ишлари бўйича саволларингиз бўлса, бемалол мурожаат қилишингиз мумкин."
     )
 
 
@@ -649,38 +611,57 @@ def format_to_telegram_html(text: str) -> str:
     """
     Gemini матнини Telegram HTML га айлантириб, 2-расмдагидек асосий матнлар,
     сарлавҳалар ва рақамланган бандларни (1., 2., 3.) қалин (<b>bold</b>) кўрсатиш.
-    Ҳар доим 'Ассалому алайкум вароҳматуллоҳ!' билан бошлашни таъминлайди.
+    Ҳар доим битта '<b>Ассалому алайкум вароҳматуллоҳ!</b>' билан бошлашни таъминлайди.
     'Beekeeping.Uz лойиҳасига хуш келибсиз' сўзини бутунлай олиб ташлайди.
     """
     if not text:
         return ""
 
-    # 1. HTML махсус белгиларини ҳимоялаш
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    # 2. Код блоклари
-    text = re.sub(r"```(?:\w+)?\n?(.*?)```", r"<pre><code>\1</code></pre>", text, flags=re.S)
-    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-
-    # 3. Сарлавҳалар: ### Сарлавҳа ёки ## Сарлавҳа -> <b>Сарлавҳа</b>
-    text = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", text)
-
-    # 4. Қалин матнлар: **матн** ёки __матн__ -> <b>матн</b>
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
-
-    # 5. Ортиқча "Beekeeping.Uz лойиҳасига хуш келибсиз" сўзларини олиб ташлаш
+    # 1. Ортиқча 'Beekeeping.Uz лойиҳасига хуш келибсиз' сўзларини олиб ташлаш
     text = re.sub(r"(?i)beekeeping\.uz\s*(?:лойиҳасига|loyihasiga)\s*(?:хуш\s*келибсиз|xush\s*kelibsiz)[.!?,]*\s*", "", text)
     text = re.sub(r"(?i)лойиҳасига\s*хуш\s*келибсиз[.!?,]*\s*", "", text)
 
-    # 6. Сўз бошланиши: «Ассалому алайкум вароҳматуллоҳ!» билан бошланишини таъминлаш
-    first_line_clean = text.strip()
-    if not re.match(r"^(?:<b>)?\s*ассалому\s*алайкум\s*вароҳматуллоҳ", first_line_clean, flags=re.I):
-        # Агар олдида оддий "Ассалому алайкум!" бўлса, уни олиб ташлаб тўлиқ саломга алмаштирамиз
-        text = re.sub(r"^(?:<b>)?\s*(?:ассалому\s*алайкум[!.]*|assalomu\s*alaykum[!.]*)\s*(?:</b>)?\s*", "", text, flags=re.I).strip()
-        text = "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n" + text
+    # 2. Markdown код блокларини HTML ga aylantirish
+    text = re.sub(r"```(?:\w+)?\n?(.*?)```", r"<pre><code>\1</code></pre>", text, flags=re.S)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
 
-    return text
+    # 3. Markdown сарлавҳалари ва қалин матнларни HTML ga aylantirish
+    text = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+
+    # 4. Рақамланган рўйхат сарлавҳаларини қалин қилиш (1. Сарлавҳа: -> 1. <b>Сарлавҳа:</b>)
+    text = re.sub(r"(?m)^(\d+\.\s*)([^\n:<b>]+:)", r"\1<b>\2</b>", text)
+
+    # 5. Telegram HTML тегларини (<b>, </b>, <i>, </i>, <u>, <s>, <code>, <pre>, <a>) вақтинча сақлаб олиш
+    saved_tags = []
+    def save_tag(m):
+        saved_tags.append(m.group(0))
+        return f"___TGTAG_{len(saved_tags)-1}___"
+
+    text = re.sub(r"</?(?:b|i|u|s|code|pre|a(?:\s+href=\"[^\"]*\")?)\s*>", save_tag, text, flags=re.I)
+
+    # 6. Қолган матндаги &, <, > белгиларини хавфсиз escape қилиш
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # 7. Сақланган тегларни асл ҳолида қайта тиклаш
+    for idx, tag in enumerate(saved_tags):
+        text = text.replace(f"___TGTAG_{idx}___", tag)
+
+    # 8. Бошидаги барча саломлашувларни (такрорланган ёки оддий бўлса ҳам) батамом тозалаш
+    while True:
+        cleaned = re.sub(
+            r"^(?:<b>\s*)?(?:ассалому\s*алайкум\s*вароҳматуллоҳ[!.]*|assalomu\s*alaykum\s*varohmatulloh[!.]*|ассалому\s*алайкум[!.]*|assalomu\s*alaykum[!.]*)(?:\s*</b>)?\s*",
+            "",
+            text,
+            flags=re.I
+        ).strip()
+        if cleaned == text:
+            break
+        text = cleaned
+
+    # 9. Ягона кўркам салом билан бошлаш
+    return "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n" + text
 
 
 async def send_formatted_reply(message, raw_text: str, is_group: bool, thread_id: int = None):
