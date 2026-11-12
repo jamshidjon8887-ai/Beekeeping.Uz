@@ -742,10 +742,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     has_photo = bool(message.photo)
     has_video = bool(message.video or message.video_note)
+    has_voice = bool(message.voice or message.audio)
     has_document = bool(message.document and (
-        message.document.mime_type and ("image" in message.document.mime_type or "video" in message.document.mime_type)
+        message.document.mime_type and ("image" in message.document.mime_type or "video" in message.document.mime_type or "audio" in message.document.mime_type or "pdf" in message.document.mime_type)
     ))
-    has_media = has_photo or has_video or has_document
+    has_media = has_photo or has_video or has_voice or has_document
 
     # Agar matn ham, media ham bo'lmasa - e'tiborsiz qoldirish
     if not raw_text and not has_media:
@@ -791,8 +792,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (bot_username and f"@{bot_username}" in text_lower)
     )
 
-    # Guruhda faqat botga qaratilgan savollar, replylar yoki bot chaqirilgan media qabul qilinadi
-    if is_group and not (is_reply_to_bot or has_trigger or raw_text.startswith("/") or (has_media and ("bot" in text_lower or "бот" in text_lower))):
+    # Guruhda quyidagi hollarda javob beriladi:
+    # - Botga reply qilinganda
+    # - "salom bot", "bot" kabi triggerlar bo'lganda
+    # - Buyruqlar (/start, /books va h.k.)
+    # - OVOZLI XABARLAR: Guruhga yuborilgan har qanday ovozli xabarni bot tinglaydi va asalarichilikka oid bo'lsa javob beradi!
+    # - Rasmli/videoli xabarda "bot" deb yozilganda
+    if is_group and not (
+        is_reply_to_bot or
+        has_trigger or
+        has_voice or
+        raw_text.startswith("/") or
+        (has_media and ("bot" in text_lower or "бот" in text_lower))
+    ):
         return
 
     # 3. KIRISH TRIGGERLARINI TOZALASH
@@ -855,6 +867,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             video_bytes = await video_file.download_as_bytearray()
             mime = getattr(video_obj, "mime_type", None) or "video/mp4"
             media_part = {"mime_type": mime, "data": bytes(video_bytes)}
+        elif has_voice:
+            voice_obj = message.voice or message.audio
+            if voice_obj.file_size and voice_obj.file_size > 20 * 1024 * 1024:
+                if not is_group:
+                    await send_formatted_reply(
+                        message,
+                        "⚠️ Овозли хабар ҳажми 20 МБ дан ортиқ. Илтимос, қисқароқ овозли хабар юборинг.",
+                        is_group=is_group,
+                        thread_id=thread_id
+                    )
+                return
+            voice_file = await voice_obj.get_file()
+            voice_bytes = await voice_file.download_as_bytearray()
+            raw_mime = getattr(voice_obj, "mime_type", None) or "audio/ogg"
+            if "ogg" in raw_mime.lower():
+                mime = "audio/ogg"
+            elif "mp3" in raw_mime.lower() or "mpeg" in raw_mime.lower():
+                mime = "audio/mp3"
+            elif "wav" in raw_mime.lower():
+                mime = "audio/wav"
+            else:
+                mime = "audio/ogg"
+            media_part = {"mime_type": mime, "data": bytes(voice_bytes)}
         elif has_document and message.document:
             doc = message.document
             doc_name = doc.file_name or "kitob.pdf"
@@ -907,7 +942,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Faylni yuklab olishda xatolik: {e}")
 
     # 5. AI UCHUN PROMPT TAYYORLASH
-    if media_part:
+    if has_voice:
+        prompt_for_ai = (
+            "Сиз Asalarichilik.Uz лойиҳасининг катта мутахассиси ва тажрибали маслаҳатчисисиз.\n"
+            "Ушбу юборилган овозли хабарни (аудиони) диққат билан тингланг ва қуйидаги қоидалар асосида жавоб беринг:\n\n"
+            "1. Агар овозли хабарда асаларичиликка оид савол (масалан: ариларга озуқа, қиём, шакар шарбати бериш, "
+            "кузги/қишки парвариш, она ари, касалликлар, уялар, асал олиш ва ҳ.к.) берилган ёки ёрдам/маслаҳат сўралган бўлса:\n"
+            "- Аввал фойдаланувчининг саволини қисқача баён этинг (масалан: «🎙 <b>Сизнинг саволингиз:</b> Ҳозирги мавсумда ариларга қиём (шарбат) берса бўладими?»);\n"
+            "- Сўнгра ушбу саволга 100% илмий ва амалий тажрибага асосланган тўлиқ, мукаммал ва аниқ фактлар билан жавоб беринг "
+            "(масалан: агар савол қиём ҳақида бўлса, салқин ва совуқ пайтда суюқ қиём бериш мутлақо хавфли, "
+            "чунки ҳаво паст ҳароратда арилар суюқ озуқани парчалай олмайди, уяда ортиқча намлик ҳосил бўлиб ич кетиш (нозематоз) касаллиги келиб чиқади; "
+            "қишловда фақат қуюқ канди хамири ёки асалли хамир берилади ва ҳоказо);\n"
+            "- Маълумот чиройли ва кўркам бўлиши учун асосий тушунчалар ва 1., 2., 3. бандларни қалин (bold) кўринишда баён этинг;\n"
+            "- Жавобни доимо '<b>Ассалому алайкум вароҳматуллоҳ!</b>' билан бошланг.\n\n"
+            "2. Агар ушбу овозли хабар асаларичиликка умуман дахлсиз бўлса (масалан: машина, маиший бошқа мавзу, шахсий бегона гаплар, бегона реклама ва ҳ.к.):\n"
+            "Фақат ва фақат битта сўз қайтаринг: 'IGNORE'. Бошқа ҳеч қандай сўз ёзманг."
+        )
+    elif media_part:
         if not clean_text:
             prompt_for_ai = (
                 "Ушбу юборилган тасвирни (расм/видео) асаларичилик нуқтаи назаридан синчковлик билан тўлиқ таҳлил қилинг. "
@@ -937,7 +988,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Foydalanuvchiga 'yozmoqda...' (typing) statusini jo'natish
     try:
-        action_type = "upload_photo" if has_photo else ("record_video" if has_video else "typing")
+        action_type = "record_voice" if has_voice else ("upload_photo" if has_photo else ("record_video" if has_video else "typing"))
         if thread_id and is_group:
             await context.bot.send_chat_action(chat_id=chat_id, action=action_type, message_thread_id=thread_id)
         else:
@@ -949,6 +1000,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Loop orqali sync funksiyani asinxron ishlatish
         loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(None, call_gemini_with_fallback, prompt_for_ai, history, media_part)
+
+        # Guruhda agar ovozli xabar asalarichilikka aloqador bo'lmasa, bot aralashmaydi
+        clean_ans = answer.strip()
+        if is_group and has_voice and (clean_ans.upper() == "IGNORE" or clean_ans.upper().startswith("IGNORE")):
+            logger.info("Ovozli xabar asalarichilikka oid emas, guruhda javob berilmadi.")
+            return
+
+        if not is_group and has_voice and (clean_ans.upper() == "IGNORE" or clean_ans.upper().startswith("IGNORE")):
+            answer = (
+                "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+                "Овозли хабарингизни эшитдим. Мен асаларичилик соҳаси бўйича мутахассис ботман. "
+                "Агар асаларичилик, арилар парвариши, қиём бериш, касалликлар ёки пасека ишлари бўйича саволларингиз бўлса, бемалол сўрашингиз мумкин."
+            )
 
         chat_memory[chat_id].append({"role": "model", "text": answer})
         if len(chat_memory[chat_id]) > MEMORY_LIMIT * 2:
@@ -1053,7 +1117,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_reaction_callback, pattern=r"^react:"))
     app.add_handler(CallbackQueryHandler(handle_book_callback, pattern=r"^book:"))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    media_filter = (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL) & ~filters.COMMAND
+    media_filter = (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE | filters.AUDIO | filters.Document.ALL) & ~filters.COMMAND
     app.add_handler(MessageHandler(media_filter, handle_message))
 
     print("Bot muvaffaqiyatli ishga tushdi va xabarlarni kutmoqda...")
