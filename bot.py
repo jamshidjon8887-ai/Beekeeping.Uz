@@ -162,27 +162,95 @@ def fetch_real_weather(region_query: str = "") -> Optional[Dict[str, Any]]:
         return None
 
 
-def detect_and_handle_datetime_weather(text: str) -> Optional[str]:
+def get_uzbek_season_desc(month: int) -> str:
+    if month in (12, 1, 2):
+        return "Қиш фасли — тўлиқ қишлов даври (арилар уяда клубок ҳолатида, насл йўқ)"
+    if month == 11:
+        return "Ноябр — кузнинг охири, қишловга кириш даври (ҳаво салқин-совуқ, аксарият уяларда насл тугаган)"
+    if month in (9, 10):
+        return "Куз фасли — қишловга тайёргарлик ва озиқа захирасини текшириш даври"
+    if month in (3, 4, 5):
+        return "Баҳор фасли — ари оилаларининг ривожланиш ва насл кўпайиш мавсуми"
+    return "Ёз фасли — асосий асал йиғим-терим мавсуми"
+
+
+def has_user_greeting(text: str) -> bool:
+    """Фойдаланувчи хабарида салом борми (Ассалому алайкум / Ассалому алейкум / Салом)"""
+    if not text:
+        return False
+    head = text.strip()[:80]
+    return bool(re.search(
+        r"(?:а+с+алом[у]?\s*ал[ае]й?кум|салом|ass?alomu?\s*al[ae]y?kum|salom)",
+        head,
+        flags=re.I
+    ))
+
+
+def is_potential_beekeeping_question(text: str) -> bool:
+    """Гуруҳда 'бот' сўзини ёзмасдан ҳам 'Ассалому алейкум Устозлар...' деб берилган асаларичилик саволларини аниқлаш"""
+    if not text or len(text.strip()) < 6:
+        return False
+    t = text.lower()
+
+    beekeeping_keywords = (
+        r"(ари|асалари|асал|бипин|амитраз|варроа|кана|қиём|киём|шарбат|шира|канди|"
+        r"уя|рамка|ром|она\s*ари|матка|мум|прополис|перга|чанг|нектар|насл|қурт|"
+        r"тухум|нозематоз|чириш|гнилец|аскосфероз|пасека|арихона|қопқоқ|тасма|"
+        r"пластина|тутун|тутаткич|фумисан|флувалинат|оксалат|чумоли|кислота|рой|кўч|"
+        r"қишлов|озуқа|озиқа|шакар|даволаш|сепса|сепиш|дори|улочка|оила|"
+        r"ari|asal|asalar|bipin|amitraz|varroa|kana|qiyom|kiyom|sharbat|shira|kandi|"
+        r"uya|ramka|ona\s*ari|matka|mum|propolis|perga|nasl|qurt|tuxum|nozema|paseka|"
+        r"tutun|roy|qishlov|ozuqa|shakar|dori|sepsa|sepish|davolash|oila)"
+    )
+    has_bee_topic = bool(re.search(beekeeping_keywords, t))
+
+    question_or_help = (
+        "?" in t or
+        bool(re.search(
+            r"(бўладими|буладими|боладими|мумкинми|керакми|борми|яхшими|зарарми|тўғрими|тугрими|"
+            r"нима\s*қил|нима\s*кил|қандай|кандай|қачон|качон|нега|неччи|неча|қайси|кайси|"
+            r"ёрдам|маслаҳат|маслахат|тавсия|тушунтириб|айтиб\s*беринг|устозлар|устоз|"
+            r"bo'ladimi|boladimi|buladimi|mumkinmi|kerakmi|bormi|yaxshimi|"
+            r"nima\s*qil|qanday|qachon|nega|nechchi|necha|qaysi|yordam|maslahat|tavsiya|ustozlar|ustoz)",
+            t
+        ))
+    )
+
+    # Салом + Устозлар + савол ёки Асаларичилик мавзуси + савол/ёрдам сўрови
+    has_ustoz = bool(re.search(r"(устозлар|устоз|ustozlar|ustoz)", t))
+    return (has_bee_topic and question_or_help) or (has_ustoz and question_or_help and len(t) > 18)
+
+
+def detect_and_handle_datetime_weather(text: str, user_greeted: bool = False) -> Optional[str]:
     text_lower = text.lower()
-    
-    # Sanani, yilni yoki kunni so'raganmi?
+
+    # Агар асаларичилик мавзуси (бипин, қиём, ари ва ҳ.к.) сўралган бўлса, бу саволни AI жавоблайди!
+    beekeeping_terms = (
+        r"(ари|асалари|асал|бипин|амитраз|варроа|кана|қиём|киём|шарбат|шира|канди|"
+        r"уя|рамка|ром|она\s*ари|матка|пасека|насл|тухум|нозематоз|қишлов|озуқа|озиқа|"
+        r"ari|asal|bipin|qiyom|sharbat|shira|kandi|uya|ramka|paseka|qishlov|ozuqa)"
+    )
+    if re.search(beekeeping_terms, text_lower):
+        return None
+
+    # Sanani, yilni yoki kunni aniq so'raganmi?
     has_date_year = bool(re.search(
-        r"(нечанчи\s*йил|йил\s*неч|сана|число|қайси\s*кун|нима\s*кун|бугунги\s*кун|нечанчи\s*число|бугун\s*қайси|йил|числони)",
+        r"(нечанчи\s*йил|қайси\s*йил|йил\s*неч|бугунги\s*сана|сана\s*неч|нечанчи\s*число|число\s*неч|қайси\s*кун|нима\s*кун|бугунги\s*кун|бугун\s*қайси|\bчислони\b)",
         text_lower
     ))
-    
-    # Vaqtni / soatni so'raganmi?
+
+    # Vaqtni / soatni aniq so'raganmi?
     has_time = bool(re.search(
-        r"(вақт|соат|минут|соат\s*неч|соат\s*қандай|ҳозир\s*вақт|соат\s*неча|вақт\s*қандай)",
+        r"(вақт\s*неч|соат\s*неч|соат\s*қандай|ҳозир\s*вақт|ҳозир\s*соат|соат\s*неча|вақт\s*қандай|\bсоат\b|\bвақт\b)",
         text_lower
     ))
-    
-    # Ob-havoni so'raganmi?
+
+    # Ob-havoni aniq so'raganmi?
     has_weather = bool(re.search(
-        r"(об-?ҳаво|ҳаво|ҳарорат|градус|обҳаво|ёмғир|қор|шамол|иссиқ|совуқ)",
+        r"(об-?ҳаво|обҳаво|ҳаво\s*қандай|бугунги\s*ҳаво|неча\s*градус|ҳарорат\s*қандай|ёмғир\s*ёғадими|қор\s*ёғадими)",
         text_lower
     ))
-    
+
     if not (has_date_year or has_time or has_weather):
         return None
         
@@ -217,8 +285,9 @@ def detect_and_handle_datetime_weather(text: str) -> Optional[str]:
             "Пасекада керакли текширув ва парвариш ишларини олиб бориш мумкин."
         )
         
+    opening = "<b>Ваалайкум ассалом вароҳматуллоҳ.</b>" if user_greeted else "<b>Ассалому алайкум вароҳматуллоҳ!</b>"
     return (
-        "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
+        f"{opening}\n\n"
         "Саволингизга аниқ ва расмий маълумотлар асосида жавоб:\n\n"
         f"1. <b>Йил:</b> Ҳозирда <b>{dt['year']}-йил</b>.\n"
         f"2. <b>Сана ва кун:</b> Бугун <b>{dt['day']}-{dt['month']}, {dt['weekday'].lower()}</b> куни.\n"
@@ -322,16 +391,15 @@ def build_books_keyboard() -> Tuple[str, Optional[InlineKeyboardMarkup]]:
 
 
 SYSTEM_INSTRUCTION = (
-    "Сиз Beekeeping.Uz 🇺🇿 асаларичилик канали ва гуруҳининг мутахассис ёрдамчисисиз.\n\n"
+    "Сиз Beekeeping.Uz 🇺🇿 асаларичилик канали ва гуруҳининг катта мутахассиси ва устоз маслаҳатчисисиз.\n\n"
     "ҚАТЪИЙ ҚОИДАЛАР:\n"
-    "1. Ҳар доим сўзингизни «Ассалому алайкум вароҳматуллоҳ!» дея бошланг.\n"
+    "1. САЛОМЛАШИШ ҚОИДАСИ: Агар фойдаланувчи саволини «Ассалому алайкум», «Ассалому алейкум» ёки «Салом» деб бошлаган бўлса, жавобни албатта «Ваалайкум ассалом вароҳматуллоҳ.» деб бошланг! Агар салом бермасдан тўғридан-тўғри савол берган бўлса, «Ассалому алайкум вароҳматуллоҳ!» деб бошланг.\n"
     "2. «Beekeeping.Uz лойиҳасига хуш келибсиз» ёки шунга ўхшаш таништирув жумлаларини МУТЛАҚО ёзманг! Дарҳол саволнинг аниқ ва амалий жавобига ўтинг.\n"
-    "3. Маълумот чиройли ва кўркам бўлиши учун асосий сарлавҳаларни ва муҳим сўзларни қалин (**bold**) қилиб кўрсатинг.\n"
-    "4. Бандларни 1., 2., 3. қилиб рақамланг ва ҳар бир банд номини қалин қилиб ажратинг (масалан: 1. **Генетик сифатни назорат қилиш (Селекция):** Табиий рой...).\n"
-    "5. РАСМ ВА ВИДЕО ТАҲЛИЛИ: Агар фойдаланувчи расм ёки видео юборса, тасвирни диққат билан тўлиқ кўриб чиқинг. "
-    "Ундаги асаларилар ҳолати, она ари бор-йўқлиги, насл ва қуртчалар рамкаси, уя тозалиги, асал сифати, кана/варроатоз ёки бошқа касаллик аломатларини аниқ фактлар асосида таҳлил қилиб, "
-    "асаларичига тўғри ва илмий-амалий фойдали маслаҳат беринг.\n"
-    "6. Барча саволларга ўзбек тилида тушунарли, аниқ ва батафсил жавоб беринг."
+    "3. САВОЛНИ ТЎҒРИ ТАЛҚИН ҚИЛИШ ВА АНИҚ ДАЛИЛЛАР: Кўпинча фойдаланувчилар «Ассалому алейкум устозлар...» дея имловий хато ёки оғзаки услубда (масалан, бипин сепиш, қиём бериш, кана тушиши ва ҳ.к.) сўрашади. Саволнинг асл моҳиятини тўғри тушунинг, ҳозирги реал сана, мавсум ва ҳаво ҳароратини ҳисобга олган ҳолда аниқ илмий-амалий далиллар (ҳарорат чегаралари, дозалар, биологик сабаблар, хавф-хатар ва хавфсиз чоралар) билан жавоб беринг.\n"
+    "4. Маълумот чиройли ва кўркам бўлиши учун асосий сарлавҳаларни ва муҳим сўзларни қалин (**bold**) қилиб кўрсатинг.\n"
+    "5. Бандларни 1., 2., 3. қилиб рақамланг ва ҳар бир банд номини қалин қилиб ажратинг (масалан: 1. **Ҳарорат ва мавсум талаби:** Ҳозирги кунда...).\n"
+    "6. РАСМ, ВИДЕО ВА ОВОЗ ТАҲЛИЛИ: Агар фойдаланувчи расм, видео ёки овозли хабар юборса, уни диққат билан таҳлил қилиб, аниқ фактлар асосида асаларичига фойдали маслаҳат беринг.\n"
+    "7. Барча саволларга ўзбек тилида тушунарли, аниқ ва батафсил жавоб беринг."
 )
 
 WELCOME_MESSAGE = (
@@ -376,14 +444,15 @@ def call_gemini_with_fallback(prompt: str, history: List[Dict[str, str]], media_
     w = fetch_real_weather(prompt)
     weather_str = f"Ҳарорат {w['temp']} (сезги {w['apparent']}), ҳолат: {w['desc']}, намлик: {w['humidity']}" if w else "Кузги/қишки салқин ҳаво"
 
+    season_desc = get_uzbek_season_desc(dt["raw_now"].month)
     realtime_context = (
-        f"\n\n[РЕАЛ ҲОЗИРГИ САНА ВА ОБ-ҲАВО]:\n"
+        f"\n\n[РЕАЛ ҲОЗИРГИ САНА, МАВСУМ ВА ОБ-ҲАВО]:\n"
         f"- Жорий йил: {dt['year']}-йил\n"
         f"- Бугунги сана: {dt['day']}-{dt['month']}, {dt['weekday']}\n"
         f"- Ҳозирги соат/вақт: {dt['time']} (Тошкент вақти, UTC+5)\n"
         f"- Ҳозирги об-ҳаво маълумоти: {weather_str}\n"
-        f"- Жорий мавсум: Ноябр (кузнинг охири, қишлов даври, ҳеч қачон май ёки баҳор эмас!)\n"
-        "ҚАТЪИЙ ҚОИДА: Йил, кун, соат ёки об-ҳаво сўралса, ФАҚАТ ушбу аниқ реал кўрсаткичларга таяниб жавоб беринг! 2024 ёки май ойларини асло ёзманг!\n"
+        f"- Жорий мавсум: {season_desc}\n"
+        "ҚАТЪИЙ ҚОИДА: Йил, кун, соат, мавсум («ҳозирги кунда») ёки об-ҳаво сўралса, ФАҚАТ ушбу аниқ реал кўрсаткичларга таяниб жавоб беринг! 2024 ёки май ойларини асло ёзманг!\n"
     )
 
     knowledge_context = load_knowledge_base_text()
@@ -607,12 +676,12 @@ async def books_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def format_to_telegram_html(text: str) -> str:
+def format_to_telegram_html(text: str, user_greeted: bool = False) -> str:
     """
-    Gemini матнини Telegram HTML га айлантириб, 2-расмдагидек асосий матнлар,
+    Gemini матнини Telegram HTML га айлантириб, асосий матнлар,
     сарлавҳалар ва рақамланган бандларни (1., 2., 3.) қалин (<b>bold</b>) кўрсатиш.
-    Ҳар доим битта '<b>Ассалому алайкум вароҳматуллоҳ!</b>' билан бошлашни таъминлайди.
-    'Beekeeping.Uz лойиҳасига хуш келибсиз' сўзини бутунлай олиб ташлайди.
+    Фойдаланувчи салом билан бошлаган бўлса '<b>Ваалайкум ассалом вароҳматуллоҳ.</b>',
+    акс ҳолда '<b>Ассалому алайкум вароҳматуллоҳ!</b>' билан бошлайди.
     """
     if not text:
         return ""
@@ -648,25 +717,42 @@ def format_to_telegram_html(text: str) -> str:
     for idx, tag in enumerate(saved_tags):
         text = text.replace(f"___TGTAG_{idx}___", tag)
 
+    # AI жавоби Ваалайкум ассалом билан бошланганми (масалан овозли хабарда салом эшитганда)?
+    ai_waalaykum = bool(re.match(
+        r"^(?:<b>\s*)?(?:ва\s*алайкум\s*ассалом|ваалайкум\s*ассалом|va\s*alaykum\s*assalom|vaalaykum\s*assalom)",
+        text.strip(),
+        flags=re.I
+    ))
+
     # 8. Бошидаги барча саломлашувларни (такрорланган ёки оддий бўлса ҳам) батамом тозалаш
+    greeting_strip_re = (
+        r"^(?:<b>\s*)?(?:"
+        r"ва\s*алайкум\s*ассалом\s*(?:ва\s*роҳматуллоҳ|ва\s*раҳматуллоҳ|вароҳматуллоҳ|вараҳматуллоҳ)?[!.,]*|"
+        r"ваалайкум\s*ассалом\s*(?:ва\s*роҳматуллоҳ|ва\s*раҳматуллоҳ|вароҳматуллоҳ|вараҳматуллоҳ)?[!.,]*|"
+        r"va\s*alaykum\s*assalom\s*(?:va\s*rohmatulloh|va\s*rahmatulloh|varohmatulloh|varahmatulloh)?[!.,]*|"
+        r"vaalaykum\s*assalom\s*(?:va\s*rohmatulloh|va\s*rahmatulloh|varohmatulloh|varahmatulloh)?[!.,]*|"
+        r"ассалому\s*ал[ае]йкум\s*(?:ва\s*роҳматуллоҳ|ва\s*раҳматуллоҳ|вароҳматуллоҳ|вараҳматуллоҳ)?[!.,]*|"
+        r"assalomu\s*al[ae]ykum\s*(?:va\s*rohmatulloh|va\s*rahmatulloh|varohmatulloh|varahmatulloh)?[!.,]*"
+        r")(?:\s*</b>)?\s*"
+    )
     while True:
-        cleaned = re.sub(
-            r"^(?:<b>\s*)?(?:ассалому\s*алайкум\s*вароҳматуллоҳ[!.]*|assalomu\s*alaykum\s*varohmatulloh[!.]*|ассалому\s*алайкум[!.]*|assalomu\s*alaykum[!.]*)(?:\s*</b>)?\s*",
-            "",
-            text,
-            flags=re.I
-        ).strip()
+        cleaned = re.sub(greeting_strip_re, "", text, flags=re.I).strip()
         if cleaned == text:
             break
         text = cleaned
 
     # 9. Ягона кўркам салом билан бошлаш
-    return "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n" + text
+    opening = (
+        "<b>Ваалайкум ассалом вароҳматуллоҳ.</b>"
+        if (user_greeted or ai_waalaykum)
+        else "<b>Ассалому алайкум вароҳматуллоҳ!</b>"
+    )
+    return f"{opening}\n\n{text}" if text else opening
 
 
-async def send_formatted_reply(message, raw_text: str, is_group: bool, thread_id: int = None):
+async def send_formatted_reply(message, raw_text: str, is_group: bool, thread_id: int = None, user_greeted: bool = False):
     """Матнни кўркам HTML шаклида, смайликлар ва ҳаволалар тугмаси билан юбориш"""
-    formatted_html = format_to_telegram_html(raw_text)
+    formatted_html = format_to_telegram_html(raw_text, user_greeted=user_greeted)
     plain_text = re.sub(r"<[^>]+>", "", formatted_html)
     info_keyboard = get_info_inline_keyboard(plain_text)
 
@@ -739,6 +825,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Matn yoki rasm/video izohi (caption)
     raw_text = (message.text or message.caption or "").strip()
     text_lower = raw_text.lower()
+    user_greeted = has_user_greeting(raw_text)
 
     has_photo = bool(message.photo)
     has_video = bool(message.video or message.video_note)
@@ -785,25 +872,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "салом бот" in text_lower or
         "salom bot" in text_lower or
         "ассалому алайкум бот" in text_lower or
+        "ассалому алейкум бот" in text_lower or
         "assalomu alaykum bot" in text_lower or
+        "assalomu aleykum bot" in text_lower or
         text_lower.startswith("бот ") or text_lower.startswith("бот,") or text_lower.startswith("бот:") or
         text_lower.startswith("bot ") or text_lower.startswith("bot,") or text_lower.startswith("bot:") or
         text_lower == "бот" or text_lower == "bot" or
         (bot_username and f"@{bot_username}" in text_lower)
     )
 
+    is_group_bee_q = is_group and not (is_reply_to_bot or has_trigger or has_voice or raw_text.startswith("/")) and is_potential_beekeeping_question(raw_text)
+
     # Guruhda quyidagi hollarda javob beriladi:
     # - Botga reply qilinganda
     # - "salom bot", "bot" kabi triggerlar bo'lganda
     # - Buyruqlar (/start, /books va h.k.)
     # - OVOZLI XABARLAR: Guruhga yuborilgan har qanday ovozli xabarni bot tinglaydi va asalarichilikka oid bo'lsa javob beradi!
-    # - Rasmli/videoli xabarda "bot" deb yozilganda
+    # - ASALARICHILIK SAVOLLARI: "Ассалому алейкум устозлар...", "хозирги кунда ариларга бипин сепса буладими" kabi guruh savollari!
+    # - Rasmli/videoli xabarda "bot" yoki asalarichilik savoli bo'lganda
     if is_group and not (
         is_reply_to_bot or
         has_trigger or
         has_voice or
+        is_group_bee_q or
         raw_text.startswith("/") or
-        (has_media and ("bot" in text_lower or "бот" in text_lower))
+        (has_media and ("bot" in text_lower or "бот" in text_lower or is_potential_beekeeping_question(raw_text)))
     ):
         return
 
@@ -813,7 +906,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_text = re.sub(rf"(?i)@{re.escape(bot_username)}", "", clean_text).strip()
 
     clean_text = re.sub(
-        r"(?i)^(ассалому\s*алайкум\s*бот|assalomu\s*alaykum\s*bot|салом\s*бот|salom\s*bot|бот|bot)[,\s:]*",
+        r"(?i)^(ассалому\s*ал[ае]йкум\s*бот|assalomu\s*al[ae]ykum\s*bot|салом\s*бот|salom\s*bot|бот|bot)[,\s:]*",
         "",
         clean_text
     ).strip()
@@ -821,17 +914,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Agar foydalanuvchi shunchaki "salom bot" deb yozgan bo'lsa (rasmsiz):
     if not clean_text and has_trigger and not has_media:
         greeting_text = (
-            "<b>Ваалайкум ассалом вараҳматуллоҳ!</b>\n\n"
-            "Сизга қандай ёрдам беришим мумкин? Асаларичилик бўйича саволингизни бемалол ёзишингиз ёки расм/видео юборишингиз мумкин."
+            "Сизга қандай ёрдам беришим мумкин? Асаларичилик бўйича саволингизни бемалол ёзишингиз, расм/видео ёки овозли хабар юборишингиз мумкин."
         )
-        await send_formatted_reply(message, greeting_text, is_group=is_group, thread_id=thread_id)
+        await send_formatted_reply(message, greeting_text, is_group=is_group, thread_id=thread_id, user_greeted=True)
         return
 
     # 4. VAQT, SANA, YIL VA OB-HAVO SAVOLLARINI 100% ANIQ VA REALL FAKTLAR BILAN JAVOBLASH
     if not has_media:
-        direct_dt_weather_reply = detect_and_handle_datetime_weather(clean_text)
+        direct_dt_weather_reply = detect_and_handle_datetime_weather(clean_text, user_greeted=user_greeted)
         if direct_dt_weather_reply:
-            await send_formatted_reply(message, direct_dt_weather_reply, is_group=is_group, thread_id=thread_id)
+            await send_formatted_reply(message, direct_dt_weather_reply, is_group=is_group, thread_id=thread_id, user_greeted=user_greeted)
             return
 
     # 4.1. KITOBLAR VA KUTUBXONA BO'YICHA SAVOLLAR
@@ -946,15 +1038,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt_for_ai = (
             "Сиз Asalarichilik.Uz лойиҳасининг катта мутахассиси ва тажрибали маслаҳатчисисиз.\n"
             "Ушбу юборилган овозли хабарни (аудиони) диққат билан тингланг ва қуйидаги қоидалар асосида жавоб беринг:\n\n"
-            "1. Агар овозли хабарда асаларичиликка оид савол (масалан: ариларга озуқа, қиём, шакар шарбати бериш, "
+            "1. Агар овозли хабарда асаларичиликка оид савол (масалан: ариларга озуқа, қиём, шакар шарбати бериш, бипин/дори сепиш, "
             "кузги/қишки парвариш, она ари, касалликлар, уялар, асал олиш ва ҳ.к.) берилган ёки ёрдам/маслаҳат сўралган бўлса:\n"
-            "- Аввал фойдаланувчининг саволини қисқача баён этинг (масалан: «🎙 <b>Сизнинг саволингиз:</b> Ҳозирги мавсумда ариларга қиём (шарбат) берса бўладими?»);\n"
-            "- Сўнгра ушбу саволга 100% илмий ва амалий тажрибага асосланган тўлиқ, мукаммал ва аниқ фактлар билан жавоб беринг "
-            "(масалан: агар савол қиём ҳақида бўлса, салқин ва совуқ пайтда суюқ қиём бериш мутлақо хавфли, "
-            "чунки ҳаво паст ҳароратда арилар суюқ озуқани парчалай олмайди, уяда ортиқча намлик ҳосил бўлиб ич кетиш (нозематоз) касаллиги келиб чиқади; "
-            "қишловда фақат қуюқ канди хамири ёки асалли хамир берилади ва ҳоказо);\n"
-            "- Маълумот чиройли ва кўркам бўлиши учун асосий тушунчалар ва 1., 2., 3. бандларни қалин (bold) кўринишда баён этинг;\n"
-            "- Жавобни доимо '<b>Ассалому алайкум вароҳматуллоҳ!</b>' билан бошланг.\n\n"
+            "- Агар овозли хабарда «Ассалому алайкум» ёки «Ассалому алейкум» деб салом берилган бўлса, жавобни албатта 'Ваалайкум ассалом вароҳматуллоҳ.' дея бошланг!\n"
+            "- Аввал фойдаланувчининг саволини қисқача баён этинг (масалан: «🎙 <b>Сизнинг саволингиз:</b> ...»);\n"
+            "- Сўнгра ушбу саволга 100% илмий ва амалий тажрибага асосланган тўлиқ, мукаммал ва аниқ далиллар билан жавоб беринг;\n"
+            "- Маълумот чиройли ва кўркам бўлиши учун асосий тушунчалар ва 1., 2., 3. бандларни қалин (bold) кўринишда баён этинг.\n\n"
             "2. Агар ушбу овозли хабар асаларичиликка умуман дахлсиз бўлса (масалан: машина, маиший бошқа мавзу, шахсий бегона гаплар, бегона реклама ва ҳ.к.):\n"
             "Фақат ва фақат битта сўз қайтаринг: 'IGNORE'. Бошқа ҳеч қандай сўз ёзманг."
         )
@@ -973,10 +1062,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Асосий сарлавҳаларни қалин (bold) қилиб, бандларни 1., 2. қилиб тартибланг."
             )
     else:
-        prompt_for_ai = clean_text or raw_text
-        if is_reply_to_bot and message.reply_to_message and message.reply_to_message.text:
-            quoted = message.reply_to_message.text[:250]
-            prompt_for_ai = f"[Олдинги жавоб: \"{quoted}\"]\nСавол: {clean_text}"
+        user_q = clean_text or raw_text
+        if is_group_bee_q:
+            prompt_for_ai = (
+                f"Гуруҳ аъзоси қуйидаги хабарни юборди:\n\"{user_q}\"\n\n"
+                "КЎРСАТМА:\n"
+                "1. Агар бу хабар асаларичилик, ари парвариши, касалликлар, дори-дармон (бипин ва б.), озуқа (қиём, канди) ёки пасека ишлари бўйича ёрдам/маслаҳат сўрови бўлмаса (шунчаки ўзаро суҳбат ёки савдо-сотиқ нархи бўлса), фақат 'IGNORE' деб қайтаринг.\n"
+                "2. Агар асаларичиликка оид савол бўлса (кўпинча 'Ассалому алейкум устозлар...' деб бошланади), саволни тўғри талқин қилиб, ҳозирги реал сана ва об-ҳавони инобатга олган ҳолда илмий ва амалий аниқ далиллар (ҳарорат меъёрлари, дозалар, биологик сабаблар ва хавфсиз тавсиялар) асосида мукаммал жавоб беринг."
+            )
+        else:
+            prompt_for_ai = user_q
+            if is_reply_to_bot and message.reply_to_message and message.reply_to_message.text:
+                quoted = message.reply_to_message.text[:250]
+                prompt_for_ai = f"[Олдинги жавоб: \"{quoted}\"]\nСавол: {user_q}"
 
     # 6. CHAT XOTIRASINI OLISH VA AI DAN JAVOB YARATISH
     if chat_id not in chat_memory:
@@ -1001,25 +1099,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(None, call_gemini_with_fallback, prompt_for_ai, history, media_part)
 
-        # Guruhda agar ovozli xabar asalarichilikka aloqador bo'lmasa, bot aralashmaydi
+        # Guruhda agar ovozli xabar yoki bilvosita savol asalarichilikka aloqador bo'lmasa, bot aralashmaydi
         clean_ans = answer.strip()
-        if is_group and has_voice and (clean_ans.upper() == "IGNORE" or clean_ans.upper().startswith("IGNORE")):
-            logger.info("Ovozli xabar asalarichilikka oid emas, guruhda javob berilmadi.")
+        if is_group and (has_voice or is_group_bee_q) and (clean_ans.upper() == "IGNORE" or clean_ans.upper().startswith("IGNORE")):
+            logger.info("Guruh xabari asalarichilik savoli emas, bot javob bermadi.")
             return
 
         if not is_group and has_voice and (clean_ans.upper() == "IGNORE" or clean_ans.upper().startswith("IGNORE")):
             answer = (
-                "<b>Ассалому алайкум вароҳматуллоҳ!</b>\n\n"
                 "Овозли хабарингизни эшитдим. Мен асаларичилик соҳаси бўйича мутахассис ботман. "
-                "Агар асаларичилик, арилар парвариши, қиём бериш, касалликлар ёки пасека ишлари бўйича саволларингиз бўлса, бемалол сўрашингиз мумкин."
+                "Агар асаларичилик, арилар парвариши, бипин/даволаш, қиём бериш ёки пасека ишлари бўйича саволларингиз бўлса, бемалол сўрашингиз мумкин."
             )
 
         chat_memory[chat_id].append({"role": "model", "text": answer})
         if len(chat_memory[chat_id]) > MEMORY_LIMIT * 2:
             chat_memory[chat_id] = chat_memory[chat_id][-MEMORY_LIMIT * 2:]
 
-        # 2-расмдагидек маълумот чиройли ва кўркам, асосий матнлар қалин (bold), бошланиши 'Ассалому алайкум вароҳматуллоҳ!' бўлади
-        await send_formatted_reply(message, answer, is_group=is_group, thread_id=thread_id)
+        await send_formatted_reply(message, answer, is_group=is_group, thread_id=thread_id, user_greeted=user_greeted)
     except Exception as e:
         logger.error(f"Xatolik: {e}")
         err_str = str(e)
